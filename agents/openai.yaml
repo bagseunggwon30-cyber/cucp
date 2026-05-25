@@ -1,0 +1,37 @@
+interface:
+  display_name: "CUCP Computer Use"
+  short_description: "로컬 Windows 데스크톱을 관찰하고 조작하는 CUCP 스킬"
+  default_prompt: "Use $cucp-computer-use to observe my current Windows app and report what I'm doing."
+policy:
+  allow_implicit_invocation: true
+triggers:
+  keywords:
+    - cucp
+    - CUP
+    - computer-use
+    - computer use
+    - windows control
+    - desktop control
+    - appshot
+    - snapshot
+    - desktop benchmark
+    - screen control
+    - 컴퓨터 유즈
+    - 컴퓨터 사용
+    - 컴퓨터 조작
+    - 내 컴퓨터 조작
+    - 내 PC 조작
+    - 앱 조작
+    - 윈도우 조작
+    - 화면 조작
+    - 데스크톱 자동화
+    - 자동화 실행
+    - 성능 측정
+    - perf
+    - benchmark
+    - 라벨 클릭
+    - 윈도우 목록
+    - 셀렉터
+    - selector
+    - find-label
+    - explain

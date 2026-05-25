@@ -1,0 +1,38 @@
+# CUCP runtime / cache (런타임에 만들어지는 파일들 — push 안 함)
+# 이 폴더들은 macro cleanup / wrapper 동작 중 자동 생성/삭제
+*.log
+*.ndjson
+wrapper-cache/
+appshot-*.json
+appshot-*.png
+screenshots/
+trajectory.ndjson
+smart-click-history.ndjson
+
+# OS / 에디터 로컬 메타
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
+
+# Python venv (만약 references/scripts 안에 들어올 경우)
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Node modules (스킬 자체엔 없지만 future-proof)
+node_modules/
+
+# 잠재적 secret 위치 (현재 없지만 향후 보호)
+.env
+.env.local
+*.key
+*.pem
+secrets/
+credentials/
+
+# Build/test temp
+*.tmp
+*.bak

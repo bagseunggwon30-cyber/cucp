@@ -1,0 +1,36 @@
+{
+  "name": "xg5000-program-check",
+  "description": "XG5000에서 Program Check 메뉴를 호출하고 결과 다이얼로그를 캡처합니다. 라이브 컨트롤이 필요하므로 plan run에는 -AllowLiveControl --readiness --strict-readiness --preflight 가 모두 필수.",
+  "actions": [
+    {
+      "action": "observe_context",
+      "match": "XG5000",
+      "annotate": true,
+      "semantic": true
+    },
+    {
+      "action": "shortcut",
+      "keys": "ctrl+s",
+      "targetWindow": "XG5000",
+      "after": "$lastObservation"
+    },
+    {
+      "action": "observe_context",
+      "match": "XG5000",
+      "annotate": true,
+      "semantic": true
+    },
+    {
+      "action": "shortcut",
+      "keys": "f7",
+      "targetWindow": "XG5000",
+      "after": "$lastObservation"
+    },
+    {
+      "action": "observe_context",
+      "match": "XG5000",
+      "annotate": true,
+      "semantic": true
+    }
+  ]
+}

@@ -1,0 +1,20 @@
+{
+  "name": "notepad-hello-world",
+  "description": "Open Notepad and type a deterministic line. Demonstrates observe -> focus -> type with target-window enforcement.",
+  "actions": [
+    {
+      "action": "observe_context",
+      "match": "메모장",
+      "annotate": true,
+      "semantic": true
+    },
+    {
+      "action": "type",
+      "text": "hello from cucp plan\n",
+      "after": "$lastObservation",
+      "targetWindow": "메모장",
+      "clear": false,
+      "enter": false
+    }
+  ]
+}
