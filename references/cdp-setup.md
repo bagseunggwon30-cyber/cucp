@@ -103,12 +103,25 @@ Kiro 의 DOM 에 접근 가능**합니다. 즉:
 
 ## smart-click 통합
 
-`smart-click` 매크로의 cascade 에 **Stage 0 (CDP if available)** 추가됨:
-1. **Stage 0**: CDP `cdp-type` / `cdp-click` (Electron 앱 + 9222 포트 열려있을 때)
-2. Stage 1~6: UIA Pattern → UIA 좌표 → icon-find → fusion → OCR → vision (기존)
+`smart-click` 매크로에는 **Stage 0 (CDP/DOM smart action)** 이 추가되어 있습니다.
+다만 CDP 포트가 닫힌 환경에서 매번 포트를 검사하면 기본 클릭 반응이 느려질 수 있어서,
+Stage 0 은 아래 옵션 중 하나가 있을 때만 시도합니다.
 
-CDP 가 가능한 환경에선 자동으로 Stage 0 부터 시도 — 빠르고 안정적.
-실패 시 Stage 1~6 정상 cascade.
+```powershell
+& <wrapper> -AllowLiveControl macro smart-click --label "Save" --allow-cdp
+& <wrapper> -AllowLiveControl macro smart-click --label "Send" --cdp-page-match Kiro
+& <wrapper> -AllowLiveControl macro smart-click --label "Run" --cdp-port 9223
+```
+
+1. **Stage 0**: CDP `cdp-smart-click` (visible text / aria-label / title / placeholder / id / name 기반 DOM click)
+2. Stage 1~6: UIA Pattern → UIA 좌표 → icon-find → fusion → OCR → vision
+
+CDP smart action이 실패하면 Stage 1~6으로 정상 cascade 됩니다.
+명확한 CSS selector를 알고 있으면 `cdp-click` / `cdp-type`을 직접 쓰고, 라벨만 알고 있으면
+`cdp-smart-click` / `cdp-smart-type`을 쓰면 됩니다.
+실행 전에 후보만 보고 싶으면 read-only `cdp-smart-find` / `cdp-smart-type-find`, 여러 경로를
+함께 비교하려면 `smart-plan --allow-cdp` 또는 입력용 `smart-plan --type-text ... --allow-cdp`를
+사용합니다.
 
 ## 한계
 

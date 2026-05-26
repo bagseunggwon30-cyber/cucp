@@ -36,3 +36,8 @@ credentials/
 # Build/test temp
 *.tmp
 *.bak
+
+# v1.4.0: 임시 디버그 / 테스트 헬퍼 (절대 commit 안 함)
+tests/_*.ps1
+tests/scratch-*.ps1
+*.pester-out

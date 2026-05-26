@@ -8,7 +8,7 @@ description: Use the local CUCP (Computer Use Control Plane) CLI from any Codex 
 CUCP wrapper:
 
 ```powershell
-& C:\Users\bark\.codex\skills\cucp-computer-use\scripts\cucp.ps1 [-AllowLiveControl] [-Brief] [-Quiet] [-CacheSeconds <n>] [-InvokeTimeoutMs <n>] <args>
+powershell -NoProfile -ExecutionPolicy Bypass -File C:\Users\K\.codex\skills\cucp-computer-use\scripts\cucp.ps1 [-AllowLiveControl] [-Brief] [-Quiet] [-CacheSeconds <n>] [-InvokeTimeoutMs <n>] <args>
 ```
 
 핵심 4가지:
@@ -61,11 +61,41 @@ CUCP wrapper:
 & <wrapper> macro windows                       # Win32 fallback, brief
 & <wrapper> macro windows --rich --json-only    # helper 통합 envelope JSON
 & <wrapper> macro find-label --label "확인" --explain        # 후보 + 점수
+& <wrapper> macro smart-plan --label "Save" --allow-cdp      # read-only route planner (CDP/UIA/OCR)
+& <wrapper> macro smart-plan --label "Save" --match "Kiro" --precision-points  # planner can recommend micro-refined click-point route
+& <wrapper> macro smart-plan --label "Message" --type-text "hello" --allow-cdp  # read-only input planner
+& <wrapper> macro app-profile --match "Chrome" --label "Send" --label "Subject" --auto-probe  # read-only app profile and capability probes
+& <wrapper> macro workflow-plan --step "macro hit-test --x 1200 --y 720 --fast" --step "macro form-plan --field Message=hello"  # read-only multi-step workflow plan
+& <wrapper> macro workflow-run --step "macro hit-test --x 1200 --y 720 --fast" --step "macro windows"  # run read-only workflow without live control
+& <wrapper> macro workflow-run --observe-after-step --step "macro hit-test --x 1200 --y 720 --fast"  # execute read-only step, then capture a cheap window observation
+& <wrapper> macro workflow-run --verify-label-after-step "Saved" --verify-label-timeout-ms 1000 --step "macro windows"  # verify a UI label after each step
+& <wrapper> macro workflow-run --retry-failed-step 2 --retry-delay-ms 100 --step "macro windows --match Notepad"  # bounded retry for flaky read-only step
+& <wrapper> macro workflow-run --dry-run --step "macro hit-test --x 1200 --y 720 --fast" --step "macro click-point --x 1200 --y 720 --target-match Kiro"  # gated macro sequence dry-run
+& <wrapper> macro task-preset --kind document --text "meeting notes" --replace --save  # read-only document preset, emits task-plan/task-run commands
+& <wrapper> macro task-preset --kind mail --to "a@example.com" --subject "Report" --body "Done" --send-label "Send" --match Gmail  # read-only mail preset
+& <wrapper> macro task-plan --app chrome --wait-title Chrome --field "To=a@example.com" --field "Subject=Report" --send-label "Send" --allow-cdp --precision-points  # read-only app/form workflow planner
+& <wrapper> macro task-plan --app notepad --wait-title Notepad --type-text "meeting notes" --shortcut "ctrl+s"  # app + free text + keyboard workflow planner
+& <wrapper> macro task-run --dry-run --app chrome --wait-title Chrome --field "To=a@example.com" --field "Subject=Report" --send-label "Send" --allow-cdp --precision-points --settle-ms 150 --verify-after-step --verify-match Chrome --retry-failed-step 1  # validate task-plan with per-step verification/retry options
+& <wrapper> macro task-run --dry-run --pre-shortcut "ctrl+a" --type-text "draft" --match Notepad --enter  # validate guarded text workflow before live control
+& <wrapper> macro form-plan --field "To=a@example.com" --field "Subject=Report" --field "Body=Done" --send-label "Send" --allow-cdp  # read-only mail/document workflow planner
+& <wrapper> -AllowLiveControl macro form-run --field "To=a@example.com" --field "Subject=Report" --field "Body=Done" --send-label "Send" --allow-cdp  # execute only if form-plan is fully safe
+& <wrapper> macro hit-test --x 1200 --y 720 --target-match Kiro --fast  # fast Win32-only point guard
+& <wrapper> macro hit-test-batch --points "1200,720;1210,720;1220,720" --target-match Kiro  # fast multi-point guard
+& <wrapper> macro hit-scan --x 1200 --y 720 --radius 4 --step 2 --target-match Kiro  # read-only micro coordinate scan
+& <wrapper> macro coord-profile --x 1200 --y 720 --target-match Kiro  # read-only DPI/monitor/window coordinate profile
+& <wrapper> macro coord-map --from window --x 40 --y 24 --target-match Kiro  # read-only window/screen/normalized coordinate transform
+& <wrapper> macro coord-anchor --x 1200 --y 720 --target-match Kiro  # read-only reusable layout-relative coordinate anchor
+& <wrapper> macro coord-anchor --x 1200 --y 720 --target-match Kiro --record-history  # optionally remember verified anchors for reuse scoring
+& <wrapper> macro point-plan --x 1200 --y 720 --radius 6 --step 2 --target-match Kiro --cache-ttl 2  # read-only precision click plan with short TTL cache
+& <wrapper> macro target-validate --x 1200 --y 720 --target-match Kiro --min-confidence medium  # read-only pre-click small target safety check
 & <wrapper> macro find-label --label "X" --match "App" --fast # Win32 fast no-match
 & <wrapper> macro icon-find --label "send" --max-size 64      # 작은 toolbar 아이콘 전용 (synonym mining)
 & <wrapper> macro list-affordances --window "설정" --limit 20
 
 & <wrapper> -AllowLiveControl macro click-label --label "Save"            # icon-find → vision 자동 fallback
+& <wrapper> -AllowLiveControl macro smart-click --label "Save" --match "Kiro" --allow-mouse-fallback --precision-points  # cascade click with micro-refined UIA coordinate fallback
+& <wrapper> -AllowLiveControl macro click-point --x 1200 --y 720 --target-match Kiro --refine uia-safe  # guarded raw coordinate click
+& <wrapper> -AllowLiveControl macro click-point --x 1200 --y 720 --target-match Kiro --micro-refine --precision-radius 6 --precision-step 2  # live click with pre-click micro scan
 & <wrapper> -AllowLiveControl macro icon-click --label "send" --max-size 64
 & <wrapper> -AllowLiveControl macro vision-click-precise --describe "purple send arrow" --crop-size 320
 & <wrapper> -AllowLiveControl macro fill-label --label "Name" --text "Alice" --clear --enter
@@ -77,11 +107,40 @@ CUCP wrapper:
 
 **작은 아이콘 정확도**: `click-label` 은 fusion 실패 시 자동으로 `icon-find` (UIA tooltip/AutomationId/AccessKey 기반) → vision 순서로 fallback. toolbar 아이콘 (16~32px) 도 한 번에 잡힘. `vision-click-precise` 는 crop-and-refine 2단계로 더 정확.
 
-**OCR (Windows.Media.Ocr — 브라우저 캔버스 / 이미지 표면용)**: `macro ocr-image --path <png>` / `macro ocr-screen --region x,y,w,h` / `macro ocr-find-text --text "Send" --match contains` / `-AllowLiveControl macro ocr-click --text "Send" --min-score 70`. `smart-click` cascade의 4단계로 자동 통합 (`--no-ocr` 로 끔). `references/command-reference.md` 의 OCR 섹션 참고.
+**OCR (Windows.Media.Ocr — 브라우저 캔버스 / 이미지 표면용)**: `macro ocr-image --path <png>` / `macro ocr-screen --region x,y,w,h` / `macro ocr-find-text --text "Send" --match contains|fuzzy --target-match <window>` / `-AllowLiveControl macro ocr-click --text "Send" --min-score 70`. OCR candidates include line/word/2~3-word n-grams, but single-word searches skip n-grams for lower lag and tie-break toward smaller word/ngram boxes for steadier click coordinates. `smart-click` keeps fast UIA paths ahead of OCR history by default (`--prefer-history` to override, `--no-ocr` to disable). `references/command-reference.md` 의 OCR 섹션 참고.
 
-**OCR+UIA fusion + screen verify + history (v0.9.0~v1.1.0)**: `macro ocr-uia-fuse --text "Send"` (fusion 가이드, read-only) / `-AllowLiveControl macro ocr-uia-invoke --text "Send"` (Name 비어도 AutomationId 로 invoke) / `macro screenshot-diff --before a.png --after b.png [--ignore-region "x,y,w,h"]` / `smart-click --verify-screen-changed --retry-on-no-change 2` / `macro history stats / show / clear` (`--no-history` 로 비활성).
+**OCR+UIA fusion + screen verify + history (v0.9.0~v1.1.0)**: `macro ocr-uia-fuse --text "Send"` (fusion 가이드, read-only) / `-AllowLiveControl macro ocr-uia-invoke --text "Send"` (Name 비어도 AutomationId 로 invoke) / `macro screenshot-diff --before a.png --after b.png [--ignore-region "x,y,w,h"]` / `smart-click --verify-screen-changed --retry-on-no-change 2` / `macro history stats / show / clear` (`--no-history` 로 비활성). OCR/icon fallback clicks use `ClickRefine uia-safe`: just before the physical click, CUCP checks the UIA element under the point and may shift to Windows UIA's native `ClickablePoint` first, then a safe rect center fallback, while preserving target-window hit-test guards.
 
-**hit-test guard + Electron CDP (v1.2.0~v1.3.0)**: `macro hit-test --x N --y N --target-match Kiro` (좌표 검증) / `safe-type` (Win32 앱용). **Electron**: `macro cdp-detect` / `cdp-eval --expr` / `-AllowLiveControl macro cdp-type --selector "textarea" --text "msg" --press-enter` (DOM 직접). 활성화: `--remote-debugging-port=9222` (`references/cdp-setup.md`).
+**hit-test guard + Electron/Chrome CDP (v1.2.0~v1.3.0)**: `macro hit-test --x N --y N --target-match Kiro` (좌표 검증 + UIA 보정 후보 표시) / `safe-type` (Win32 앱용). **CDP/DOM**: `macro cdp-detect` / `cdp-eval --expr` / `-AllowLiveControl macro cdp-type --selector "textarea" --text "msg" --press-enter` / `cdp-smart-click --text "Send"` / `cdp-smart-type --label "Message" --text "msg"` (DOM 직접). `smart-click --allow-cdp` 또는 `--cdp-page-match`로 Stage 0 opt-in. 활성화: `--remote-debugging-port=9222` (`references/cdp-setup.md`).
+
+**v1.4.0 신규 — DOM bridge v2 + IME + recovery + benchmark + packaging**:
+```powershell
+# DOM bridge v2 traversal report (Shadow DOM + iframe)
+& <wrapper> macro cdp-deep-find --text "Send" --page-match Kiro
+
+# 한국어 IME-safe paste (live)
+& <wrapper> -AllowLiveControl macro ime-paste --text "안녕" --target-match Notepad --press-enter
+& <wrapper> -AllowLiveControl macro safe-type-ime --text "회의록" --target-match Notepad --verify-title Notepad
+
+# UI recovery loop (실패 후 재관찰 + retry 추천)
+& <wrapper> macro modal-detect
+& <wrapper> macro recovery-plan --failed-step "macro click-label --label Save"
+& <wrapper> macro recovery-run --dry-run             # plan only, no actuation
+& <wrapper> -AllowLiveControl macro recovery-run --confirm-sensitive   # actuate (sensitive gate)
+
+# Coordinate precision validation (read-only)
+& <wrapper> macro precision-validate --x 1200 --y 720 --target-match Kiro --samples 5
+
+# Benchmark suite (read-only, PII 미수집)
+& <wrapper> macro benchmark --iters 3
+
+# Release notes (CHANGELOG 자동 split + secret redact)
+& <wrapper> macro release-notes
+& <wrapper> macro release-notes --version 1.4.0 --json-only
+& <wrapper> macro release-notes --since 1.3.0 --json-only
+```
+
+**v1.4.0 보안 보완**: `release-notes` 출력 직전 GitHub PAT / OpenAI sk- / AWS AKIA / Bearer / JWT / PEM 6종 자동 redact (`[REDACTED:tag]`). `recovery-run` 의 live action 은 `--confirm-sensitive` 강제. `benchmark` 측정 결과에 입력 텍스트/PII 미포함.
 
 ## Diagnostics & Performance
 
@@ -121,7 +180,7 @@ CUCP wrapper:
 ## Regression Tests
 
 ```powershell
-Invoke-Pester C:\Users\bark\.codex\skills\cucp-computer-use\tests\cucp.Tests.ps1
+Invoke-Pester C:\Users\K\.codex\skills\cucp-computer-use\tests\cucp.Tests.ps1
 ```
 
 ## Audit Trail

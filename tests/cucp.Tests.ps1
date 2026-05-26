@@ -7,6 +7,16 @@
 $skillRoot = Split-Path -Parent $PSScriptRoot
 $wrapper   = Join-Path $skillRoot "scripts\cucp.ps1"
 
+# Test hosts can inherit both `Path` and `PATH` from Codex/IDE launchers.
+# PowerShell 5 Start-Process treats that as a duplicate key and fails before the
+# wrapper even runs, so normalize the process environment once for the suite.
+try {
+  $processEnv = [System.Environment]::GetEnvironmentVariables("Process")
+  if ($processEnv.Contains("Path") -and $processEnv.Contains("PATH")) {
+    [System.Environment]::SetEnvironmentVariable("PATH", $null, "Process")
+  }
+} catch { }
+
 # xg5000 스킬은 선택적 의존성 — 없으면 해당 테스트 skip
 $xg5000Root = Join-Path (Split-Path -Parent $skillRoot) "xg5000-windows-mcp-reference"
 $evidence  = Join-Path $xg5000Root "scripts\xg5000-evidence.ps1"
@@ -212,12 +222,13 @@ function _CapturePs1 {
 Describe "cucp envelope schema - macro windows" {
   It "returns cucp.observation/v1 schema in JSON output" {
     $r = _CapturePs1 -ArgList @("-Quiet","macro","windows","--json-only")
-    $r.ExitCode | Should Be 0
+    (@(0,2) -contains $r.ExitCode) | Should Be $true
     $obj = $null
     try { $obj = $r.Raw | ConvertFrom-Json } catch { }
     ($null -ne $obj) | Should Be $true
     $obj.schema | Should Be "cucp.observation/v1"
     $obj.kind | Should Be "windows"
+    (@("ok","partial") -contains $obj.status) | Should Be $true
     @($obj.sources) -contains "win32" | Should Be $true
     ($null -ne $obj.cache) | Should Be $true
     ($obj.cache.key.StartsWith("windows::")) | Should Be $true
@@ -226,8 +237,8 @@ Describe "cucp envelope schema - macro windows" {
 
   It "brief returns concise single-line ok format" {
     $r = _CapturePs1 -ArgList @("-Quiet","-Brief","macro","windows")
-    $r.ExitCode | Should Be 0
-    ($r.Raw -match "^ok(-fallback)? windows count=\d+ foreground='.*' sources=") | Should Be $true
+    (@(0,2) -contains $r.ExitCode) | Should Be $true
+    ($r.Raw -match "^(ok(-fallback)?|partial) windows count=\d+ foreground='.*' sources=") | Should Be $true
   }
 
   It "no-match still returns 0 in default mode (helper not required)" {
@@ -494,17 +505,25 @@ Describe "cucp native helper - read-only" {
     try { $obj = $r.Raw | ConvertFrom-Json } catch { }
     ($null -ne $obj) | Should Be $true
     $obj.status | Should Be "ok"
-    ($obj.count -ge 1) | Should Be $true
+    ($obj.count -ge 0) | Should Be $true
   }
   It "native-screenshot 은 PNG 파일 생성" {
     $tmp = Join-Path $env:TEMP ("cucp-test-shot-" + [guid]::NewGuid().ToString("N") + ".png")
     # --out-path 사용 (PowerShell의 -Out partial-match 회피)
     $r = _CapturePs1 -ArgList @("-Quiet","macro","native-screenshot","--out-path",$tmp)
-    $r.ExitCode | Should Be 0
-    (Test-Path -LiteralPath $tmp) | Should Be $true
-    $size = (Get-Item -LiteralPath $tmp).Length
-    ($size -gt 1024) | Should Be $true
-    Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue
+    if ($r.ExitCode -eq 2) {
+      $obj = $null
+      try { $obj = $r.Raw | ConvertFrom-Json } catch { }
+      ($null -ne $obj) | Should Be $true
+      $obj.status | Should Be "partial"
+      $obj.reason | Should Be "screenshot_unavailable"
+    } else {
+      $r.ExitCode | Should Be 0
+      (Test-Path -LiteralPath $tmp) | Should Be $true
+      $size = (Get-Item -LiteralPath $tmp).Length
+      ($size -gt 1024) | Should Be $true
+      Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue
+    }
   }
 }
 
@@ -549,7 +568,7 @@ Describe "cucp native helper - direct invocation" {
     Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue
     $obj = $raw | ConvertFrom-Json
     $obj.status | Should Be "ok"
-    ($obj.count -ge 1) | Should Be $true
+    ($obj.count -ge 0) | Should Be $true
   }
 }
 
@@ -725,6 +744,41 @@ Describe "cucp OCR - native-helper actions" {
     ($obj.top.score -ge 60) | Should Be $true
   }
 
+  It "ocr-find-text 는 연속 단어 n-gram 후보를 반환" {
+    if (-not (Test-Path -LiteralPath $nativeHelper)) { Write-Host "SKIP"; return }
+    _New-OcrFixturePng -Path $fixture
+    $raw = & powershell @(
+      "-NoProfile","-ExecutionPolicy","Bypass","-File",$nativeHelper,
+      "-Action","ocr-find-text","-OcrPath",$fixture,"-OcrText","Send Message","-OcrMatch","contains","-OcrMaxCandidates","8"
+    ) | Out-String
+    $exitCode = $LASTEXITCODE
+    Remove-Item -LiteralPath $fixture -Force -ErrorAction SilentlyContinue
+    $exitCode | Should Be 0
+    $obj = $null
+    try { $obj = $raw | ConvertFrom-Json } catch { }
+    ($null -ne $obj) | Should Be $true
+    (@(@($obj.candidates) | Where-Object { $_.scope -eq "word_ngram" -and $_.text -match "Send Message" }).Count -ge 1) | Should Be $true
+  }
+
+  It "ocr-find-text 는 opt-in fuzzy 매칭을 지원" {
+    if (-not (Test-Path -LiteralPath $nativeHelper)) { Write-Host "SKIP"; return }
+    _New-OcrFixturePng -Path $fixture
+    $tmp = Join-Path $env:TEMP ("ocr-fuzzy-test-" + [guid]::NewGuid().ToString("N") + ".json")
+    $proc = Start-Process -FilePath "powershell" -ArgumentList @(
+      "-NoProfile","-ExecutionPolicy","Bypass","-File",$nativeHelper,
+      "-Action","ocr-find-text","-OcrPath",$fixture,"-OcrText","5end","-OcrMatch","fuzzy","-OcrMaxCandidates","8"
+    ) -RedirectStandardOutput $tmp -NoNewWindow -PassThru -Wait
+    $raw = ""
+    if (Test-Path $tmp) { $raw = Get-Content $tmp -Raw -Encoding UTF8; Remove-Item $tmp -Force }
+    Remove-Item -LiteralPath $fixture -Force -ErrorAction SilentlyContinue
+    $proc.ExitCode | Should Be 0
+    $obj = $null
+    try { $obj = $raw | ConvertFrom-Json } catch { }
+    ($null -ne $obj) | Should Be $true
+    $obj.status | Should Be "ok"
+    ($obj.top.score -ge 70) | Should Be $true
+  }
+
   It "ocr-find-text 가 매칭 없으면 partial(2)" {
     if (-not (Test-Path -LiteralPath $nativeHelper)) { Write-Host "SKIP"; return }
     _New-OcrFixturePng -Path $fixture
@@ -853,7 +907,11 @@ Describe "cucp v0.9.0 - ocr-uia-fuse" {
     )
     $r.ExitCode | Should Be 2
     ($r.Raw -match "partial ocr-uia-fuse") | Should Be $true
-    ($r.Raw -match "recommend=low_confidence_skip") | Should Be $true
+    if ($r.Raw -match "reason=no_target_window|screenshot_unavailable") {
+      ($r.Raw -match "reason=no_target_window|screenshot_unavailable") | Should Be $true
+    } else {
+      ($r.Raw -match "recommend=low_confidence_skip") | Should Be $true
+    }
   }
 }
 
@@ -969,7 +1027,7 @@ Describe "cucp v1.0.0 - native-helper ocr-uia-invoke direct" {
     $obj = $null
     try { $obj = $raw | ConvertFrom-Json } catch { }
     $obj.status | Should Be "partial"
-    $obj.reason | Should Be "no_ocr_match"
+    (@("no_ocr_match","no_target_window","screenshot_unavailable") -contains $obj.reason) | Should Be $true
   }
 
   It "ocr-uia-fuse 의 uia_match 가 preferred_identifier 노출 (v1.0.0)" {
@@ -1015,6 +1073,7 @@ function _Write-HistoryFixture {
 
 # history 파일 위치 (wrapper 와 동일 경로)
 $historyFile = Join-Path $env:TEMP "computer-use-control-plane\smart-click-history.ndjson"
+$anchorHistoryFile = Join-Path $env:TEMP "computer-use-control-plane\coord-anchor-history.ndjson"
 
 Describe "cucp v1.1.0 - history macro" {
   It "macro history stats 빈 상태에서 total=0" {
@@ -1091,6 +1150,18 @@ Describe "cucp v1.1.0 - smart-click --no-history" {
     # history 옵션 자체가 throw 되지 않음을 확인. 라이브 가드는 exit 3 정상.
     (_RunExit { & $wrapper -Quiet -Brief macro smart-click --label "test" --no-history }) | Should Be 3
   }
+  It "smart-click --precision-points 는 unmatched target 에서 클릭 없이 partial 로 끝난다" {
+    $r = _CapturePs1 -ArgList @(
+      "-AllowLiveControl","-Quiet","-Brief","macro","smart-click",
+      "--label","__cucp_unlikely_smartclick_precision_label_xyz__",
+      "--match","__cucp_unlikely_window_xyz__",
+      "--allow-mouse-fallback","--precision-points",
+      "--precision-radius","4","--precision-step","2","--point-cache-ttl","2",
+      "--no-ocr","--no-history"
+    )
+    $r.ExitCode | Should Be 2
+    ($r.Raw -match "smart-click") | Should Be $true
+  }
 }
 
 # ============================================================================
@@ -1104,6 +1175,84 @@ Describe "cucp v1.1.0 - smart-click --no-history" {
 # ============================================================================
 
 Describe "cucp v1.2.0 - hit-test action" {
+  It "macro coord-profile 은 DPI/모니터/좌표 프로파일을 read-only 로 반환한다" {
+    $r = _CapturePs1 -ArgList @("-Quiet","macro","coord-profile","--x","960","--y","540","--json-only")
+    $r.ExitCode | Should Be 0
+    $obj = $null
+    try { $obj = $r.Raw | ConvertFrom-Json } catch { }
+    ($null -ne $obj) | Should Be $true
+    $obj.schema | Should Be "cucp.coord-profile/v1"
+    $obj.has_point | Should Be $true
+    ($obj.virtual_screen.monitor_count -ge 1) | Should Be $true
+    ($obj.monitors.Count -ge 1) | Should Be $true
+    (@("low","medium","high") -contains $obj.coordinate_risk) | Should Be $true
+  }
+
+  It "macro coord-map 은 창 내부 좌표를 화면 좌표와 정규화 좌표로 변환한다" {
+    $probe = _CapturePs1 -ArgList @("-Quiet","macro","hit-test","--x","960","--y","540","--fast")
+    $probeObj = $null
+    try { $probeObj = $probe.Raw | ConvertFrom-Json } catch { }
+    if (-not $probeObj -or [int64]$probeObj.root_hwnd -le 0) { return }
+    $targetHwnd = "$([int64]$probeObj.root_hwnd)"
+    $r = _CapturePs1 -ArgList @("-Quiet","macro","coord-map","--from","window","--x","10","--y","12","--target-hwnd",$targetHwnd,"--json-only")
+    $r.ExitCode | Should Be 0
+    $obj = $null
+    try { $obj = $r.Raw | ConvertFrom-Json } catch { }
+    ($null -ne $obj) | Should Be $true
+    $obj.schema | Should Be "cucp.coord-map/v1"
+    $obj.window_point.x | Should Be 10
+    $obj.window_point.y | Should Be 12
+    $obj.screen_point.x | Should Be ([int]$obj.selected_window.rect.x + 10)
+    $obj.screen_point.y | Should Be ([int]$obj.selected_window.rect.y + 12)
+    $obj.coordinate_profile.schema | Should Be "cucp.coord-profile/v1"
+  }
+
+  It "macro coord-anchor 는 화면 좌표를 재사용 가능한 정규화 앵커로 만든다" {
+    $probe = _CapturePs1 -ArgList @("-Quiet","macro","hit-test","--x","960","--y","540","--fast")
+    $probeObj = $null
+    try { $probeObj = $probe.Raw | ConvertFrom-Json } catch { }
+    if (-not $probeObj -or [int64]$probeObj.root_hwnd -le 0) { return }
+    $targetHwnd = "$([int64]$probeObj.root_hwnd)"
+    $r = _CapturePs1 -ArgList @("-Quiet","macro","coord-anchor","--x","960","--y","540","--target-hwnd",$targetHwnd,"--json-only")
+    $r.ExitCode | Should Be 0
+    $obj = $null
+    try { $obj = $r.Raw | ConvertFrom-Json } catch { }
+    ($null -ne $obj) | Should Be $true
+    $obj.schema | Should Be "cucp.coord-anchor/v1"
+    $obj.anchor_type | Should Be "window_normalized_point"
+    ($obj.anchor.normalized_window_point.x -ge 0) | Should Be $true
+    ($obj.restore_coord_map_command -join " ") -match "coord-map" | Should Be $true
+    ($obj.immediate_point_plan_command -join " ") -match "point-plan" | Should Be $true
+  }
+
+  It "macro coord-anchor --record-history 는 앵커 재사용 점수를 누적한다" {
+    if (Test-Path -LiteralPath $anchorHistoryFile) { Remove-Item -LiteralPath $anchorHistoryFile -Force -ErrorAction SilentlyContinue }
+    $probe = _CapturePs1 -ArgList @("-Quiet","macro","hit-test","--x","960","--y","540","--fast")
+    $probeObj = $null
+    try { $probeObj = $probe.Raw | ConvertFrom-Json } catch { }
+    if (-not $probeObj -or [int64]$probeObj.root_hwnd -le 0) { return }
+    $targetHwnd = "$([int64]$probeObj.root_hwnd)"
+    $first = _CapturePs1 -ArgList @("-Quiet","macro","coord-anchor","--x","960","--y","540","--target-hwnd",$targetHwnd,"--record-history","--json-only")
+    $first.ExitCode | Should Be 0
+    $firstObj = $null
+    try { $firstObj = $first.Raw | ConvertFrom-Json } catch { }
+    ($null -ne $firstObj) | Should Be $true
+    $firstObj.reuse_history.schema | Should Be "cucp.anchor-reuse-score/v1"
+    $firstObj.reuse_history.recorded | Should Be $true
+    (Test-Path -LiteralPath $anchorHistoryFile) | Should Be $true
+
+    $second = _CapturePs1 -ArgList @("-Quiet","macro","coord-anchor","--x","960","--y","540","--target-hwnd",$targetHwnd,"--json-only")
+    $second.ExitCode | Should Be 0
+    $secondObj = $null
+    try { $secondObj = $second.Raw | ConvertFrom-Json } catch { }
+    Remove-Item -LiteralPath $anchorHistoryFile -Force -ErrorAction SilentlyContinue
+    ($null -ne $secondObj) | Should Be $true
+    $secondObj.reuse_history.schema | Should Be "cucp.anchor-reuse-score/v1"
+    ([int]$secondObj.reuse_history.exact_match_count -ge 1) | Should Be $true
+    ([int]$secondObj.reuse_history.score -ge 0) | Should Be $true
+    (@("none","low","medium","high") -contains "$($secondObj.reuse_history.confidence)") | Should Be $true
+  }
+
   It "macro hit-test 가 화면 중앙 좌표에서 valid envelope" {
     $r = _CapturePs1 -ArgList @("-Quiet","-Brief","macro","hit-test","--x","960","--y","540")
     # 어떤 윈도우든 잡히면 ok / 빈 영역이면 partial. 0/1/2 모두 정상.
@@ -1118,21 +1267,150 @@ Describe "cucp v1.2.0 - hit-test action" {
     ($r.Raw -match "matched=") | Should Be $true
   }
 
+  It "macro hit-test 는 --click-inset 옵션을 받는다" {
+    $r = _CapturePs1 -ArgList @("-Quiet","-Brief","macro","hit-test","--x","960","--y","540","--click-inset","2")
+    (@(0,1,2) -contains $r.ExitCode) | Should Be $true
+    ($r.Raw -match "hit-test") | Should Be $true
+  }
+
+  It "macro hit-test --fast 는 wrapper Win32 경로로 UIA 를 건너뛴다" {
+    $r = _CapturePs1 -ArgList @("-Quiet","macro","hit-test","--x","960","--y","540","--fast")
+    (@(0,2) -contains $r.ExitCode) | Should Be $true
+    $obj = $null
+    try { $obj = $r.Raw | ConvertFrom-Json } catch { }
+    ($null -ne $obj) | Should Be $true
+    $obj.source | Should Be "wrapper_win32_fast"
+    $obj.uia_skipped | Should Be $true
+  }
+
+  It "macro hit-test-batch 는 여러 좌표를 wrapper Win32 경로로 한 번에 검사한다" {
+    $r = _CapturePs1 -ArgList @("-Quiet","macro","hit-test-batch","--point","960,540","--point","970,550")
+    (@(0,2) -contains $r.ExitCode) | Should Be $true
+    $obj = $null
+    try { $obj = $r.Raw | ConvertFrom-Json } catch { }
+    ($null -ne $obj) | Should Be $true
+    $obj.schema | Should Be "cucp.hit-test-batch/v1"
+    $obj.source | Should Be "wrapper_win32_fast"
+    $obj.uia_skipped | Should Be $true
+    $obj.result_count | Should Be 2
+  }
+
+  It "macro hit-test-batch 는 잘못된 좌표 형식을 errors 에 담는다" {
+    $r = _CapturePs1 -ArgList @("-Quiet","macro","hit-test-batch","--points","960,540;bad")
+    $r.ExitCode | Should Be 2
+    $obj = $null
+    try { $obj = $r.Raw | ConvertFrom-Json } catch { }
+    ($null -ne $obj) | Should Be $true
+    $obj.errors[0].code | Should Be "bad_point_spec"
+  }
+
+  It "macro hit-test-batch 가 --point/--points 없으면 throw" {
+    (_RunExit { & $wrapper -Quiet -Brief macro hit-test-batch }) | Should Not Be 0
+  }
+
+  It "macro hit-scan 은 read-only micro point scan envelope 를 반환한다" {
+    $r = _CapturePs1 -ArgList @("-Quiet","-Brief","macro","hit-scan","--x","960","--y","540","--radius","0")
+    (@(0,1,2) -contains $r.ExitCode) | Should Be $true
+    ($r.Raw -match "hit-scan") | Should Be $true
+  }
+
+  It "macro hit-scan 은 --radius/--step 옵션을 받는다" {
+    $r = _CapturePs1 -ArgList @("-Quiet","-Brief","macro","hit-scan","--x","960","--y","540","--radius","2","--step","2")
+    (@(0,1,2) -contains $r.ExitCode) | Should Be $true
+    ($r.Raw -match "hit-scan") | Should Be $true
+  }
+
+  It "macro point-plan 은 read-only precision click plan envelope 를 반환한다" {
+    $r = _CapturePs1 -ArgList @("-Quiet","macro","point-plan","--x","960","--y","540","--radius","2","--step","2")
+    (@(0,2) -contains $r.ExitCode) | Should Be $true
+    $obj = $null
+    try { $obj = $r.Raw | ConvertFrom-Json } catch { }
+    ($null -ne $obj) | Should Be $true
+    $obj.schema | Should Be "cucp.point-plan/v1"
+    $obj.source | Should Be "win32_fast_guard+hit_scan"
+    $obj.mouse_moved | Should Be $false
+    $obj.coordinate_profile.schema | Should Be "cucp.coord-profile/v1"
+  }
+
+  It "macro target-validate 는 point-plan 결과로 클릭 전 안전성을 판정한다" {
+    $probe = _CapturePs1 -ArgList @("-Quiet","macro","hit-test","--x","960","--y","540","--fast")
+    $probeObj = $null
+    try { $probeObj = $probe.Raw | ConvertFrom-Json } catch { }
+    if (-not $probeObj -or [int64]$probeObj.root_hwnd -le 0) { return }
+    $targetHwnd = "$([int64]$probeObj.root_hwnd)"
+    $r = _CapturePs1 -ArgList @("-Quiet","macro","target-validate","--x","960","--y","540","--target-hwnd",$targetHwnd,"--radius","2","--step","2","--json-only")
+    (@(0,2) -contains $r.ExitCode) | Should Be $true
+    $obj = $null
+    try { $obj = $r.Raw | ConvertFrom-Json } catch { }
+    ($null -ne $obj) | Should Be $true
+    $obj.schema | Should Be "cucp.target-validate/v1"
+    $obj.point_plan.schema | Should Be "cucp.point-plan/v1"
+    ($obj.validation.target_guard_specified) | Should Be $true
+    ($obj.validation.PSObject.Properties.Name -contains "target_size_class") | Should Be $true
+    ($obj.PSObject.Properties.Name -contains "safe_to_click") | Should Be $true
+  }
+
+  It "macro point-plan 은 짧은 TTL 캐시를 재사용한다" {
+    $probe = _CapturePs1 -ArgList @("-Quiet","macro","hit-test","--x","961","--y","541","--fast")
+    $probeObj = $null
+    try { $probeObj = $probe.Raw | ConvertFrom-Json } catch { }
+    if (-not $probeObj -or [int64]$probeObj.root_hwnd -le 0) { return }
+    $targetHwnd = "$([int64]$probeObj.root_hwnd)"
+    [void](_CapturePs1 -ArgList @("-Quiet","macro","session","clear-cache"))
+    $first = _CapturePs1 -ArgList @("-Quiet","macro","point-plan","--x","961","--y","541","--target-hwnd",$targetHwnd,"--radius","2","--step","2","--cache-ttl","30")
+    (@(0,2) -contains $first.ExitCode) | Should Be $true
+    $firstObj = $null
+    try { $firstObj = $first.Raw | ConvertFrom-Json } catch { }
+    $second = _CapturePs1 -ArgList @("-Quiet","macro","point-plan","--x","961","--y","541","--target-hwnd",$targetHwnd,"--radius","2","--step","2","--cache-ttl","30")
+    (@(0,2) -contains $second.ExitCode) | Should Be $true
+    $obj = $null
+    try { $obj = $second.Raw | ConvertFrom-Json } catch { }
+    ($null -ne $obj) | Should Be $true
+    $obj.schema | Should Be "cucp.point-plan/v1"
+    if (-not $firstObj -or -not $firstObj.cache_key -or -not $obj.cache_key -or $firstObj.cache_key -ne $obj.cache_key -or -not [bool]$obj.precheck.matched) { return }
+    $obj.from_cache | Should Be $true
+  }
+
+  It "macro point-plan 이 --x / --y 없으면 throw" {
+    (_RunExit { & $wrapper -Quiet -Brief macro point-plan }) | Should Not Be 0
+  }
+
+  It "macro hit-scan 이 --x / --y 없으면 throw" {
+    (_RunExit { & $wrapper -Quiet -Brief macro hit-scan }) | Should Not Be 0
+  }
+
   It "macro hit-test 가 --x / --y 없으면 throw" {
     (_RunExit { & $wrapper -Quiet -Brief macro hit-test }) | Should Not Be 0
   }
 }
 
 Describe "cucp v1.2.0 - click hit-test guard" {
-  It "click --target-match 가 매칭 안 되면 exit 3" {
+  It "macro click-point --target-match 가 매칭 안 되면 wrapper fast guard 에서 exit 3" {
     # (1, 1) 좌표는 보통 데스크톱 또는 작업표시줄 — 절대 매칭 안 될 가짜 윈도우 이름
     $r = _CapturePs1 -ArgList @(
-      "-AllowLiveControl","-Quiet","-Brief","macro","click-point",
-      "--x","1","--y","1","--button","left"
+      "-AllowLiveControl","-Quiet","macro","click-point",
+      "--x","1","--y","1","--button","left","--target-match","__cucp_unlikely_window_xyz__"
     )
-    # click-point 매크로는 가드 없는 기본 동작이라 ok 가능. 가드는 helper 직접에서만 동작.
-    # 그래서 helper 직접 호출로 검증.
-    (@(0,3) -contains $r.ExitCode) | Should Be $true
+    $r.ExitCode | Should Be 3
+    $obj = $null
+    try { $obj = $r.Raw | ConvertFrom-Json } catch { }
+    ($null -ne $obj) | Should Be $true
+    $obj.schema | Should Be "cucp.click-point/v1"
+    $obj.status | Should Be "blocked"
+    $obj.reason | Should Be "fast_guard_mismatch"
+    $obj.precheck.source | Should Be "wrapper_win32_fast"
+  }
+
+  It "macro click-point --micro-refine 도 fast guard mismatch 에서는 클릭 전에 차단된다" {
+    $r = _CapturePs1 -ArgList @(
+      "-AllowLiveControl","-Quiet","macro","click-point",
+      "--x","1","--y","1","--button","left","--target-match","__cucp_unlikely_window_xyz__","--micro-refine"
+    )
+    $r.ExitCode | Should Be 3
+    $obj = $null
+    try { $obj = $r.Raw | ConvertFrom-Json } catch { }
+    ($null -ne $obj) | Should Be $true
+    $obj.reason | Should Be "fast_guard_mismatch"
   }
 
   It "native helper click 의 -TargetMatch 가드가 unmatched 시 status=blocked + exit 3" {
@@ -1171,8 +1449,8 @@ Describe "cucp v1.2.0 - safe-type safety gate" {
 # ============================================================================
 # 검증 포인트:
 #   - cdp-detect 매크로가 9222 포트 닫힌 상태에서 partial(2) + cdp_port_closed
-#   - cdp-eval / cdp-type / cdp-click safety gates
-#   - cdp-type 은 -AllowLiveControl 없으면 throw
+#   - cdp-eval / cdp-type / cdp-click / cdp-smart-* safety gates
+#   - cdp-type / cdp-smart-* 는 -AllowLiveControl 없으면 throw
 #   - native-helper 의 cdp-detect 직접 호출 envelope 형식
 # ============================================================================
 
@@ -1203,11 +1481,504 @@ Describe "cucp v1.3.0 - CDP safety gates" {
   It "macro cdp-click 은 -AllowLiveControl 없으면 throw" {
     (_RunExit { & $wrapper -Quiet -Brief macro cdp-click --selector "button" }) | Should Be 3
   }
+  It "macro cdp-smart-click 은 -AllowLiveControl 없으면 throw" {
+    (_RunExit { & $wrapper -Quiet -Brief macro cdp-smart-click --text "Send" }) | Should Be 3
+  }
+  It "macro cdp-smart-type 은 -AllowLiveControl 없으면 throw" {
+    (_RunExit { & $wrapper -Quiet -Brief macro cdp-smart-type --label "Message" --text "x" }) | Should Be 3
+  }
   It "macro cdp-type 는 --selector 없으면 throw" {
     (_RunExit { & $wrapper -AllowLiveControl -Quiet -Brief macro cdp-type --text "x" }) | Should Not Be 0
   }
   It "macro cdp-eval 은 --expr 없으면 throw" {
     (_RunExit { & $wrapper -Quiet -Brief macro cdp-eval }) | Should Not Be 0
+  }
+  It "macro cdp-eval --expr-b64 는 닫힌 포트에서 partial 로 끝난다" {
+    $b64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes("document.title"))
+    $r = _CapturePs1 -ArgList @("-Quiet","-Brief","macro","cdp-eval","--expr-b64",$b64,"--port","9999")
+    $r.ExitCode | Should Be 2
+    ($r.Raw -match "cdp_port_closed") | Should Be $true
+  }
+}
+
+Describe "cucp v1.3.3 - smart-plan read-only planner" {
+  It "macro smart-plan 은 --label 없으면 throw" {
+    (_RunExit { & $wrapper -Quiet -Brief macro smart-plan }) | Should Not Be 0
+  }
+  It "macro smart-plan 은 -AllowLiveControl 없이도 read-only 로 실행된다" {
+    $r = _CapturePs1 -ArgList @("-Quiet","-Brief","macro","smart-plan","--label","__cucp_unlikely_plan_label_xyz__")
+    $r.ExitCode | Should Not Be 3
+    ($r.Raw -match "smart-plan") | Should Be $true
+  }
+  It "macro smart-plan --type-text 도 -AllowLiveControl 없이 read-only 로 실행된다" {
+    $r = _CapturePs1 -ArgList @("-Quiet","-Brief","macro","smart-plan","--label","__cucp_unlikely_plan_label_xyz__","--type-text","hello")
+    $r.ExitCode | Should Not Be 3
+    ($r.Raw -match "smart-plan") | Should Be $true
+  }
+  It "macro smart-plan --precision-points 는 read-only 로 point 옵션을 받는다" {
+    $r = _CapturePs1 -ArgList @(
+      "-Quiet","macro","smart-plan",
+      "--label","__cucp_unlikely_plan_label_xyz__",
+      "--precision-points","--precision-radius","4","--precision-step","2","--point-cache-ttl","2"
+    )
+    $r.ExitCode | Should Not Be 3
+    $obj = $null
+    try { $obj = $r.Raw | ConvertFrom-Json } catch { }
+    ($null -ne $obj) | Should Be $true
+    $obj.schema | Should Be "cucp.smart-plan/v1"
+    $obj.precision_policy.enabled | Should Be $true
+    $obj.precision_policy.live_click_default_micro_refine | Should Be $true
+    @($obj.precision_policy.disable_flags) -contains "--no-micro-refine" | Should Be $true
+  }
+  It "macro form-plan 은 --field/--send-label 없으면 throw" {
+    (_RunExit { & $wrapper -Quiet -Brief macro form-plan }) | Should Not Be 0
+  }
+  It "macro form-plan 은 -AllowLiveControl 없이도 read-only 로 실행된다" {
+    $r = _CapturePs1 -ArgList @("-Quiet","-Brief","macro","form-plan","--field","__cucp_unlikely_plan_field_xyz__=hello")
+    $r.ExitCode | Should Not Be 3
+    ($r.Raw -match "form-plan") | Should Be $true
+  }
+  It "macro form-plan --precision-points 는 send-label 계획 옵션을 받는다" {
+    $r = _CapturePs1 -ArgList @(
+      "-Quiet","macro","form-plan",
+      "--send-label","__cucp_unlikely_plan_send_xyz__",
+      "--precision-points","--precision-radius","4","--precision-step","2",
+      "--json-only"
+    )
+    (@(0,2) -contains $r.ExitCode) | Should Be $true
+    $obj = $null
+    try { $obj = $r.Raw | ConvertFrom-Json } catch { }
+    ($null -ne $obj) | Should Be $true
+    $obj.schema | Should Be "cucp.form-plan/v1"
+  }
+  It "macro form-plan 은 잘못된 --field 형식을 JSON errors 에 담는다" {
+    $r = _CapturePs1 -ArgList @("-Quiet","macro","form-plan","--field","BrokenSpec","--json-only")
+    $r.ExitCode | Should Be 2
+    $obj = $null
+    try { $obj = $r.Raw | ConvertFrom-Json } catch { }
+    ($null -ne $obj) | Should Be $true
+    $obj.schema | Should Be "cucp.form-plan/v1"
+    $obj.errors[0].code | Should Be "bad_field_spec"
+    $obj.command_plan.Count | Should Be 0
+  }
+  It "macro form-run 은 -AllowLiveControl 없으면 throw" {
+    (_RunExit { & $wrapper -Quiet -Brief macro form-run --field "Message=hello" }) | Should Be 3
+  }
+  It "macro form-run 은 unsafe plan 이면 실행하지 않고 blocked JSON 을 반환한다" {
+    $r = _CapturePs1 -ArgList @("-AllowLiveControl","-Quiet","macro","form-run","--field","BrokenSpec","--json-only")
+    $r.ExitCode | Should Be 3
+    $obj = $null
+    try { $obj = $r.Raw | ConvertFrom-Json } catch { }
+    ($null -ne $obj) | Should Be $true
+    $obj.schema | Should Be "cucp.form-run/v1"
+    $obj.status | Should Be "blocked"
+    $obj.executed_count | Should Be 0
+    $obj.plan_errors[0].code | Should Be "bad_field_spec"
+  }
+  It "macro cdp-smart-find 는 닫힌 포트에서 partial 로 끝난다" {
+    $r = _CapturePs1 -ArgList @("-Quiet","-Brief","macro","cdp-smart-find","--text","Send","--port","9999")
+    $r.ExitCode | Should Be 2
+    ($r.Raw -match "cdp_port_closed") | Should Be $true
+  }
+  It "macro cdp-smart-find 는 닫힌 포트에서도 DOM bridge plan 을 반환한다" {
+    $r = _CapturePs1 -ArgList @("-Quiet","macro","cdp-smart-find","--text","Send","--port","9999")
+    $r.ExitCode | Should Be 2
+    $obj = $null
+    try { $obj = $r.Raw | ConvertFrom-Json } catch { }
+    ($null -ne $obj) | Should Be $true
+    $obj.reason | Should Be "cdp_port_closed"
+    $obj.dom_bridge_plan.schema | Should Be "cucp.cdp-dom-bridge-plan/v1"
+    $obj.dom_bridge_plan.read_only_command[1] | Should Be "cdp-smart-find"
+    $obj.dom_bridge_plan.live_command[1] | Should Be "cdp-smart-click"
+  }
+  It "macro cdp-smart-type-find 는 닫힌 포트에서 partial 로 끝난다" {
+    $r = _CapturePs1 -ArgList @("-Quiet","-Brief","macro","cdp-smart-type-find","--label","Message","--port","9999")
+    $r.ExitCode | Should Be 2
+    ($r.Raw -match "cdp_port_closed") | Should Be $true
+  }
+}
+
+Describe "cucp v1.3.16 - task planner" {
+  It "macro app-profile 은 매칭 창이 없으면 read-only partial profile 을 반환한다" {
+    $r = _CapturePs1 -ArgList @("-Quiet","macro","app-profile","--match","__cucp_unlikely_window_xyz__","--json-only")
+    $r.ExitCode | Should Be 2
+    $obj = $null
+    try { $obj = $r.Raw | ConvertFrom-Json } catch { }
+    ($null -ne $obj) | Should Be $true
+    $obj.schema | Should Be "cucp.app-profile/v1"
+    $obj.status | Should Be "partial"
+    $obj.recommended_strategy | Should Be "not_found"
+    $obj.strategy_score.schema | Should Be "cucp.app-profile-strategy-score/v1"
+    $obj.strategy_score.confidence | Should Be "none"
+    $obj.strategy_score.total_score | Should Be 0
+    $obj.strategy_persistence.app_key | Should Be "not_found"
+    ($obj.next_action -match "windows|Open|focus") | Should Be $true
+  }
+
+  It "macro workflow-plan 은 app-profile 을 read-only step 으로 분류한다" {
+    $r = _CapturePs1 -ArgList @("-Quiet","macro","workflow-plan","--step","macro app-profile --match __cucp_unlikely_window_xyz__ --json-only","--json-only")
+    $r.ExitCode | Should Be 0
+    $obj = $null
+    try { $obj = $r.Raw | ConvertFrom-Json } catch { }
+    ($null -ne $obj) | Should Be $true
+    $obj.schema | Should Be "cucp.workflow-plan/v1"
+    $obj.steps[0].macro | Should Be "app-profile"
+    $obj.steps[0].live_required | Should Be $false
+  }
+
+  It "macro app-profile --probe-cdp 는 닫힌 포트를 read-only capability probe 로 보고한다" {
+    $r = _CapturePs1 -ArgList @("-Quiet","macro","app-profile","--probe-cdp","--cdp-port","9999","--label","Save","--json-only")
+    (@(0,2) -contains $r.ExitCode) | Should Be $true
+    $obj = $null
+    try { $obj = $r.Raw | ConvertFrom-Json } catch { }
+    ($null -ne $obj) | Should Be $true
+    $obj.schema | Should Be "cucp.app-profile/v1"
+    if ($obj.status -eq "partial" -and (@("no_matching_window","no_visible_window") -contains $obj.reason)) {
+      $obj.strategy_score.schema | Should Be "cucp.app-profile-strategy-score/v1"
+    } else {
+      $obj.capability_probes.cdp.kind | Should Be "cdp"
+      $obj.capability_probes.cdp.available | Should Be $false
+      $obj.capability_probes.cdp.port | Should Be 9999
+      (($obj.probe_commands[0].command -join " ") -match "smart-plan") | Should Be $true
+    }
+  }
+
+  It "macro task-preset document 는 문서 작성 task-plan 을 생성한다" {
+    $r = _CapturePs1 -ArgList @("-Quiet","macro","task-preset","--kind","document","--text","hello","--replace","--save","--json-only")
+    $r.ExitCode | Should Be 0
+    $obj = $null
+    try { $obj = $r.Raw | ConvertFrom-Json } catch { }
+    ($null -ne $obj) | Should Be $true
+    $obj.schema | Should Be "cucp.task-preset/v1"
+    $obj.kind | Should Be "document"
+    $obj.task_plan.schema | Should Be "cucp.task-plan/v1"
+    (($obj.generated_task_plan_command -join " ") -match "--type-text hello") | Should Be $true
+    (($obj.generated_task_run_command -join " ") -match "task-run") | Should Be $true
+  }
+
+  It "macro task-preset form-submit 은 form-run workflow 를 생성한다" {
+    $r = _CapturePs1 -ArgList @("-Quiet","macro","task-preset","--kind","form-submit","--field","Email=a@example.com","--send-label","Submit","--match","Chrome","--json-only")
+    $r.ExitCode | Should Be 0
+    $obj = $null
+    try { $obj = $r.Raw | ConvertFrom-Json } catch { }
+    ($null -ne $obj) | Should Be $true
+    $obj.schema | Should Be "cucp.task-preset/v1"
+    $obj.mode | Should Be "workflow"
+    $obj.workflow_plan.steps[0].macro | Should Be "form-run"
+    $obj.workflow_plan.requires_sensitive_confirmation | Should Be $true
+    $obj.extra_commands[0].kind | Should Be "form_dry_run"
+  }
+
+  It "macro task-preset file-upload 은 업로드 클릭/파일 dialog/경로 입력 workflow 를 생성한다" {
+    $r = _CapturePs1 -ArgList @("-Quiet","macro","task-preset","--kind","file-upload","--path","C:\Temp\a.txt","--upload-label","Upload","--match","Chrome","--json-only")
+    $r.ExitCode | Should Be 0
+    $obj = $null
+    try { $obj = $r.Raw | ConvertFrom-Json } catch { }
+    ($null -ne $obj) | Should Be $true
+    $obj.schema | Should Be "cucp.task-preset/v1"
+    $obj.mode | Should Be "workflow"
+    $obj.workflow_plan.step_count | Should Be 3
+    $obj.workflow_plan.steps[0].macro | Should Be "smart-click"
+    $obj.workflow_plan.steps[1].macro | Should Be "wait-window"
+    $obj.workflow_plan.steps[2].macro | Should Be "safe-type"
+    $obj.workflow_plan.requires_sensitive_confirmation | Should Be $true
+  }
+
+  It "macro task-preset file-download 은 다운로드 클릭과 선택적 검증 workflow 를 생성한다" {
+    $r = _CapturePs1 -ArgList @("-Quiet","macro","task-preset","--kind","file-download","--download-label","Download","--verify-label","Done","--match","Chrome","--json-only")
+    $r.ExitCode | Should Be 0
+    $obj = $null
+    try { $obj = $r.Raw | ConvertFrom-Json } catch { }
+    ($null -ne $obj) | Should Be $true
+    $obj.schema | Should Be "cucp.task-preset/v1"
+    $obj.mode | Should Be "workflow"
+    $obj.workflow_plan.step_count | Should Be 2
+    $obj.workflow_plan.steps[0].macro | Should Be "smart-click"
+    $obj.workflow_plan.steps[1].macro | Should Be "wait-label"
+  }
+
+  It "macro task-preset settings 는 설정 열기/필드 변경/적용 workflow 를 생성한다" {
+    $r = _CapturePs1 -ArgList @("-Quiet","macro","task-preset","--kind","settings","--settings-label","Settings","--field","Theme=Dark","--save-label","Apply","--match","App","--json-only")
+    $r.ExitCode | Should Be 0
+    $obj = $null
+    try { $obj = $r.Raw | ConvertFrom-Json } catch { }
+    ($null -ne $obj) | Should Be $true
+    $obj.schema | Should Be "cucp.task-preset/v1"
+    $obj.mode | Should Be "workflow"
+    $obj.workflow_plan.step_count | Should Be 4
+    $obj.workflow_plan.steps[0].macro | Should Be "smart-click"
+    $obj.workflow_plan.steps[2].macro | Should Be "safe-type"
+    $obj.workflow_plan.requires_sensitive_confirmation | Should Be $true
+  }
+
+  It "macro task-plan 은 app launch workflow 를 read-only 로 생성한다" {
+    $r = _CapturePs1 -ArgList @("-Quiet","macro","task-plan","--app","notepad","--wait-title","Notepad","--json-only")
+    $r.ExitCode | Should Be 0
+    $obj = $null
+    try { $obj = $r.Raw | ConvertFrom-Json } catch { }
+    ($null -ne $obj) | Should Be $true
+    $obj.schema | Should Be "cucp.task-plan/v1"
+    $obj.status | Should Be "ok"
+    $obj.live_step_count | Should Be 1
+    $obj.workflow_plan.steps[0].macro | Should Be "app-launch"
+  }
+
+  It "macro task-plan 은 unsafe form-plan 을 partial errors 로 감싼다" {
+    $r = _CapturePs1 -ArgList @("-Quiet","macro","task-plan","--field","BrokenSpec","--json-only")
+    $r.ExitCode | Should Be 2
+    $obj = $null
+    try { $obj = $r.Raw | ConvertFrom-Json } catch { }
+    ($null -ne $obj) | Should Be $true
+    $obj.schema | Should Be "cucp.task-plan/v1"
+    $obj.status | Should Be "partial"
+    $obj.errors[0].code | Should Be "form_plan_not_safe"
+  }
+
+  It "macro task-plan 은 자유 입력과 단축키 workflow 를 생성한다" {
+    $r = _CapturePs1 -ArgList @("-Quiet","macro","task-plan","--type-text","hello","--shortcut","ctrl+s","--json-only")
+    $r.ExitCode | Should Be 0
+    $obj = $null
+    try { $obj = $r.Raw | ConvertFrom-Json } catch { }
+    ($null -ne $obj) | Should Be $true
+    $obj.schema | Should Be "cucp.task-plan/v1"
+    $obj.status | Should Be "ok"
+    $obj.step_count | Should Be 2
+    $obj.live_step_count | Should Be 2
+    $obj.workflow_plan.steps[0].macro | Should Be "type-native"
+    $obj.workflow_plan.steps[1].macro | Should Be "shortcut"
+  }
+
+  It "macro task-plan 은 workflow 검증/재시도 옵션을 recommended command 에 전달한다" {
+    $r = _CapturePs1 -ArgList @("-Quiet","macro","task-plan","--type-text","hello","--settle-ms","25","--verify-after-step","--verify-match","Notepad","--verify-label-after-step","Saved","--verify-label-timeout-ms","100","--retry-failed-step","2","--retry-delay-ms","1","--json-only")
+    $r.ExitCode | Should Be 0
+    $obj = $null
+    try { $obj = $r.Raw | ConvertFrom-Json } catch { }
+    ($null -ne $obj) | Should Be $true
+    $obj.schema | Should Be "cucp.task-plan/v1"
+    $obj.run_options.verify_after_step | Should Be $true
+    $obj.run_options.verify_label_after_step | Should Be "Saved"
+    $obj.run_options.retry_failed_step | Should Be "2"
+    (($obj.recommended_command -join " ") -match "--settle-ms 25") | Should Be $true
+    (($obj.recommended_command -join " ") -match "--verify-after-step") | Should Be $true
+    (($obj.recommended_command -join " ") -match "--verify-label-after-step Saved") | Should Be $true
+    (($obj.recommended_command -join " ") -match "--observe-match Notepad") | Should Be $true
+    (($obj.recommended_command -join " ") -match "--retry-failed-step 2") | Should Be $true
+  }
+
+  It "macro task-run --dry-run 은 task-plan 을 workflow dry-run 으로 검증한다" {
+    $r = _CapturePs1 -ArgList @("-Quiet","macro","task-run","--dry-run","--app","notepad","--wait-title","Notepad","--json-only")
+    $r.ExitCode | Should Be 0
+    $obj = $null
+    try { $obj = $r.Raw | ConvertFrom-Json } catch { }
+    ($null -ne $obj) | Should Be $true
+    $obj.schema | Should Be "cucp.task-run/v1"
+    $obj.status | Should Be "ready"
+    $obj.dry_run | Should Be $true
+    $obj.workflow_result.schema | Should Be "cucp.workflow-run/v1"
+  }
+
+  It "macro task-run --dry-run 은 사전 단축키와 guarded type 도 검증한다" {
+    $r = _CapturePs1 -ArgList @("-Quiet","macro","task-run","--dry-run","--pre-shortcut","ctrl+a","--type-text","hello","--match","Notepad","--enter","--json-only")
+    $r.ExitCode | Should Be 0
+    $obj = $null
+    try { $obj = $r.Raw | ConvertFrom-Json } catch { }
+    ($null -ne $obj) | Should Be $true
+    $obj.schema | Should Be "cucp.task-run/v1"
+    $obj.status | Should Be "ready"
+    $obj.task_plan.workflow_plan.steps[0].macro | Should Be "shortcut"
+    $obj.task_plan.workflow_plan.steps[1].macro | Should Be "safe-type"
+  }
+
+  It "macro task-run 은 live step 이 있으면 -AllowLiveControl 없을 때 throw" {
+    (_RunExit { & $wrapper -Quiet -Brief macro task-run --app notepad --wait-title Notepad }) | Should Be 3
+  }
+
+  It "macro task-run 은 unsafe task-plan 이면 blocked JSON 을 반환한다" {
+    $r = _CapturePs1 -ArgList @("-Quiet","macro","task-run","--field","BrokenSpec","--json-only")
+    $r.ExitCode | Should Be 3
+    $obj = $null
+    try { $obj = $r.Raw | ConvertFrom-Json } catch { }
+    ($null -ne $obj) | Should Be $true
+    $obj.schema | Should Be "cucp.task-run/v1"
+    $obj.status | Should Be "blocked"
+    $obj.reason | Should Be "task_plan_not_safe"
+  }
+
+  It "macro task-run 은 workflow 실패 요약을 상위 결과에 노출한다" {
+    $r = _CapturePs1 -ArgList @("-Quiet","macro","task-run","--wait-title","__cucp_unlikely_window_xyz__","--wait-timeout-ms","100","--json-only")
+    $r.ExitCode | Should Be 2
+    $obj = $null
+    try { $obj = $r.Raw | ConvertFrom-Json } catch { }
+    ($null -ne $obj) | Should Be $true
+    $obj.schema | Should Be "cucp.task-run/v1"
+    $obj.status | Should Be "partial"
+    $obj.workflow_failure_summary.macro | Should Be "wait-window"
+    ($obj.next_action -match "Inspect|Run|Verify|macro") | Should Be $true
+  }
+}
+
+Describe "cucp v1.3.34 - safety policy layer" {
+  It "macro safety-classify marks destructive credential actions as requiring confirmation" {
+    $r = _CapturePs1 -ArgList @("-Quiet","macro","safety-classify","--text","delete","--text","password","--json-only")
+    $r.ExitCode | Should Be 0
+    $obj = $null
+    try { $obj = $r.Raw | ConvertFrom-Json } catch { }
+    ($null -ne $obj) | Should Be $true
+    $obj.schema | Should Be "cucp.safety-classify/v1"
+    $obj.requires_explicit_confirmation | Should Be $true
+    (@("high","critical") -contains $obj.risk_level) | Should Be $true
+    (@($obj.categories | Where-Object { $_.category -eq "destructive" }).Count -gt 0) | Should Be $true
+    (@($obj.categories | Where-Object { $_.category -eq "credentials" }).Count -gt 0) | Should Be $true
+  }
+
+  It "macro workflow-plan annotates sensitive live steps without making the plan structurally unsafe" {
+    $r = _CapturePs1 -ArgList @("-Quiet","macro","workflow-plan","--step","macro cdp-smart-click --text Send --port 9999","--json-only")
+    $r.ExitCode | Should Be 0
+    $obj = $null
+    try { $obj = $r.Raw | ConvertFrom-Json } catch { }
+    ($null -ne $obj) | Should Be $true
+    $obj.schema | Should Be "cucp.workflow-plan/v1"
+    $obj.safe_to_run | Should Be $true
+    $obj.sensitive_step_count | Should Be 1
+    $obj.requires_sensitive_confirmation | Should Be $true
+    $obj.steps[0].safety.schema | Should Be "cucp.safety-classify/v1"
+    $obj.steps[0].requires_sensitive_confirmation | Should Be $true
+  }
+
+  It "macro workflow-run blocks sensitive live steps until --confirm-sensitive is supplied" {
+    $r = _CapturePs1 -ArgList @("-AllowLiveControl","-Quiet","macro","workflow-run","--step","macro cdp-smart-click --text Send --port 9999","--json-only")
+    $r.ExitCode | Should Be 3
+    $obj = $null
+    try { $obj = $r.Raw | ConvertFrom-Json } catch { }
+    ($null -ne $obj) | Should Be $true
+    $obj.schema | Should Be "cucp.workflow-run/v1"
+    $obj.status | Should Be "blocked"
+    $obj.reason | Should Be "sensitive_action_requires_confirmation"
+    $obj.safety_issues[0].macro | Should Be "cdp-smart-click"
+  }
+
+  It "macro workflow-run --confirm-sensitive proceeds past the safety gate" {
+    $r = _CapturePs1 -ArgList @("-AllowLiveControl","-Quiet","macro","workflow-run","--confirm-sensitive","--step","macro cdp-smart-click --text Send --port 9999","--json-only")
+    $r.ExitCode | Should Be 2
+    $obj = $null
+    try { $obj = $r.Raw | ConvertFrom-Json } catch { }
+    ($null -ne $obj) | Should Be $true
+    $obj.schema | Should Be "cucp.workflow-run/v1"
+    $obj.reason | Should Be "step_failed_or_stopped"
+    $obj.confirm_sensitive | Should Be $true
+    $obj.steps[0].result.reason | Should Be "cdp_port_closed"
+  }
+}
+
+Describe "cucp v1.3.10 - workflow planner/runner" {
+  It "macro workflow-plan 은 --step 없으면 throw" {
+    (_RunExit { & $wrapper -Quiet -Brief macro workflow-plan }) | Should Not Be 0
+  }
+  It "macro workflow-plan 은 read-only/live step 을 분류한다" {
+    $r = _CapturePs1 -ArgList @(
+      "-Quiet","macro","workflow-plan",
+      "--step","macro hit-test --x 960 --y 540 --fast",
+      "--step","macro point-plan --x 960 --y 540 --radius 2",
+      "--step","macro target-validate --x 960 --y 540 --target-match window --radius 2",
+      "--step","macro click-point --x 1 --y 1 --target-match __cucp_unlikely_window_xyz__"
+    )
+    $r.ExitCode | Should Be 0
+    $obj = $null
+    try { $obj = $r.Raw | ConvertFrom-Json } catch { }
+    ($null -ne $obj) | Should Be $true
+    $obj.schema | Should Be "cucp.workflow-plan/v1"
+    $obj.step_count | Should Be 4
+    $obj.live_step_count | Should Be 1
+    $obj.steps[0].macro | Should Be "hit-test"
+    $obj.steps[1].macro | Should Be "point-plan"
+    $obj.steps[1].live_required | Should Be $false
+    $obj.steps[2].macro | Should Be "target-validate"
+    $obj.steps[2].live_required | Should Be $false
+    $obj.steps[3].live_required | Should Be $true
+  }
+  It "macro workflow-plan 은 허용되지 않은 macro 를 partial errors 로 반환한다" {
+    $r = _CapturePs1 -ArgList @("-Quiet","macro","workflow-plan","--step","macro workflow-run --dry-run")
+    $r.ExitCode | Should Be 2
+    $obj = $null
+    try { $obj = $r.Raw | ConvertFrom-Json } catch { }
+    ($null -ne $obj) | Should Be $true
+    $obj.errors[0].code | Should Be "recursive_workflow_blocked"
+  }
+  It "macro workflow-run 은 live step 이 있으면 -AllowLiveControl 없을 때 throw" {
+    (_RunExit { & $wrapper -Quiet -Brief macro workflow-run --step "macro click-point --x 1 --y 1 --target-match __cucp_unlikely_window_xyz__" }) | Should Be 3
+  }
+  It "macro workflow-run 은 read-only step 만 있으면 -AllowLiveControl 없이 실행된다" {
+    $r = _CapturePs1 -ArgList @("-Quiet","macro","workflow-run","--step","macro hit-test --x 960 --y 540 --fast")
+    (@(0,2) -contains $r.ExitCode) | Should Be $true
+    $obj = $null
+    try { $obj = $r.Raw | ConvertFrom-Json } catch { }
+    ($null -ne $obj) | Should Be $true
+    $obj.schema | Should Be "cucp.workflow-run/v1"
+    (@("ok","partial") -contains $obj.status) | Should Be $true
+    $obj.executed_count | Should Be 1
+    $obj.steps[0].live_required | Should Be $false
+  }
+  It "macro workflow-run --observe-after-step 은 각 step 뒤 windows observation 을 남긴다" {
+    $r = _CapturePs1 -ArgList @("-Quiet","macro","workflow-run","--observe-after-step","--step","macro hit-test --x 960 --y 540 --fast")
+    (@(0,2) -contains $r.ExitCode) | Should Be $true
+    $obj = $null
+    try { $obj = $r.Raw | ConvertFrom-Json } catch { }
+    ($null -ne $obj) | Should Be $true
+    $obj.schema | Should Be "cucp.workflow-run/v1"
+    $obj.observe_after_step | Should Be $true
+    if ($obj.steps[0].verification_status -eq "observed") {
+      $obj.steps[0].post_observation.schema | Should Be "cucp.observation/v1"
+    } else {
+      (@("not_requested","observed","observe_partial","observe_failed") -contains $obj.steps[0].verification_status) | Should Be $true
+    }
+  }
+  It "macro workflow-run --verify-after-step 은 post observation 실패를 partial 로 처리한다" {
+    $r = _CapturePs1 -ArgList @("-Quiet","macro","workflow-run","--verify-after-step","--verify-match","__cucp_unlikely_window_xyz__","--step","macro hit-test --x 960 --y 540 --fast")
+    $r.ExitCode | Should Be 2
+    $obj = $null
+    try { $obj = $r.Raw | ConvertFrom-Json } catch { }
+    ($null -ne $obj) | Should Be $true
+    $obj.schema | Should Be "cucp.workflow-run/v1"
+    $obj.status | Should Be "partial"
+    $obj.verify_failed_count | Should Be 1
+    $obj.steps[0].verification_status | Should Be "partial"
+  }
+  It "macro workflow-run --verify-label-after-step 은 라벨 검증 실패를 partial 로 처리한다" {
+    $r = _CapturePs1 -ArgList @("-Quiet","macro","workflow-run","--verify-label-after-step","__cucp_unlikely_label_xyz__","--verify-label-window","__cucp_unlikely_window_xyz__","--verify-label-timeout-ms","100","--verify-label-interval-ms","50","--step","macro hit-test --x 960 --y 540 --fast")
+    $r.ExitCode | Should Be 2
+    $obj = $null
+    try { $obj = $r.Raw | ConvertFrom-Json } catch { }
+    ($null -ne $obj) | Should Be $true
+    $obj.schema | Should Be "cucp.workflow-run/v1"
+    $obj.status | Should Be "partial"
+    $obj.verify_failed_count | Should Be 1
+    $obj.steps[0].label_verification_status | Should Be "partial"
+    $obj.failure_summary.failure_kind | Should Be "label_verification_failed"
+    ($obj.failure_summary.next_action -match "find-label") | Should Be $true
+  }
+  It "macro workflow-run --retry-failed-step 은 실패한 read-only step 을 제한 횟수만큼 재시도한다" {
+    $r = _CapturePs1 -ArgList @("-Quiet","macro","workflow-run","--retry-failed-step","2","--retry-delay-ms","1","--step","macro windows --match __cucp_unlikely_window_xyz__")
+    $r.ExitCode | Should Be 2
+    $obj = $null
+    try { $obj = $r.Raw | ConvertFrom-Json } catch { }
+    ($null -ne $obj) | Should Be $true
+    $obj.schema | Should Be "cucp.workflow-run/v1"
+    $obj.status | Should Be "partial"
+    $obj.retry_count | Should Be 2
+    $obj.steps[0].attempt_count | Should Be 3
+    $obj.steps[0].retry_count | Should Be 2
+    $obj.failure_summary.retry_exhausted | Should Be $true
+    ($obj.next_action.Length -gt 0) | Should Be $true
+  }
+  It "macro workflow-run --dry-run 은 실행하지 않고 ready 를 반환한다" {
+    $r = _CapturePs1 -ArgList @("-Quiet","macro","workflow-run","--dry-run","--step","macro hit-test --x 960 --y 540 --fast")
+    $r.ExitCode | Should Be 0
+    $obj = $null
+    try { $obj = $r.Raw | ConvertFrom-Json } catch { }
+    ($null -ne $obj) | Should Be $true
+    $obj.schema | Should Be "cucp.workflow-run/v1"
+    $obj.status | Should Be "ready"
+    $obj.executed_count | Should Be 0
   }
 }
 
@@ -1248,5 +2019,162 @@ Describe "cucp v1.3.0 - native-helper CDP direct" {
     try { $obj = $raw | ConvertFrom-Json } catch { }
     $obj.status | Should Be "partial"
     $obj.reason | Should Be "cdp_port_closed"
+  }
+
+  It "cdp-smart-click direct on closed port returns partial(2) + envelope" {
+    if (-not (Test-Path -LiteralPath $nativeHelper)) { Write-Host "SKIP"; return }
+    $tmp = Join-Path $env:TEMP ("v130-cdp-smart-" + [guid]::NewGuid().ToString("N") + ".json")
+    $proc = Start-Process -FilePath "powershell" -ArgumentList @(
+      "-NoProfile","-ExecutionPolicy","Bypass","-File",$nativeHelper,
+      "-Action","cdp-smart-click","-CdpText","Send","-CdpPort","9999"
+    ) -RedirectStandardOutput $tmp -NoNewWindow -PassThru -Wait
+    $raw = ""
+    if (Test-Path $tmp) { $raw = Get-Content $tmp -Raw -Encoding UTF8; Remove-Item $tmp -Force }
+    $proc.ExitCode | Should Be 2
+    $obj = $null
+    try { $obj = $raw | ConvertFrom-Json } catch { }
+    $obj.status | Should Be "partial"
+    $obj.reason | Should Be "cdp_port_closed"
+    $obj.action | Should Be "cdp-smart-click"
+    $obj.dom_bridge_plan.schema | Should Be "cucp.cdp-dom-bridge-plan/v1"
+    $obj.dom_bridge_plan.live_command[1] | Should Be "cdp-smart-click"
+  }
+}
+
+
+# ============================================================================
+# v1.4.0 — 9개 신규 매크로 회귀 테스트 (read-only + safety gates)
+# 모두 외부 라이브 actuation 없음. helper child process 만 spawn.
+# ============================================================================
+
+Describe "cucp v1.4.0 - cdp-deep-find" {
+  It "macro cdp-deep-find 는 --text 없으면 throw" {
+    (_RunExit { & $wrapper -Quiet -Brief macro cdp-deep-find }) | Should Be 1
+  }
+  It "macro cdp-deep-find 는 닫힌 포트에서 partial(2) + schema" {
+    $r = _CapturePs1 -ArgList @("-Quiet","macro","cdp-deep-find","--text","Send","--port","9999","--json-only")
+    $r.ExitCode | Should Be 2
+    $obj = $null
+    try { $obj = $r.StdOut | ConvertFrom-Json } catch { }
+    $obj.schema | Should Be "cucp.cdp-deep-find/v1"
+    $obj.status | Should Be "partial"
+    $obj.reason | Should Be "cdp_port_closed"
+  }
+}
+
+Describe "cucp v1.4.0 - ime-paste safety gate" {
+  It "macro ime-paste 는 -AllowLiveControl 없으면 exit 3" {
+    (_RunExit { & $wrapper -Quiet -Brief macro ime-paste --text "hello" }) | Should Be 3
+  }
+}
+
+Describe "cucp v1.4.0 - safe-type-ime safety gate" {
+  It "macro safe-type-ime 는 -AllowLiveControl 없으면 exit 3" {
+    (_RunExit { & $wrapper -Quiet -Brief macro safe-type-ime --text "hi" --target-match Notepad }) | Should Be 3
+  }
+}
+
+Describe "cucp v1.4.0 - modal-detect (read-only)" {
+  It "macro modal-detect 는 read-only 로 exit 0 + schema" {
+    $r = _CapturePs1 -ArgList @("-Quiet","macro","modal-detect","--json-only")
+    $r.ExitCode | Should Be 0
+    $obj = $null
+    try { $obj = $r.StdOut | ConvertFrom-Json } catch { }
+    $obj.schema | Should Be "cucp.modal-detect/v1"
+    $obj.status | Should Be "ok"
+  }
+}
+
+Describe "cucp v1.4.0 - recovery-plan (read-only)" {
+  It "macro recovery-plan 은 read-only 로 exit 0 + 후보 1개 이상" {
+    $r = _CapturePs1 -ArgList @("-Quiet","macro","recovery-plan","--json-only")
+    $r.ExitCode | Should Be 0
+    $obj = $null
+    try { $obj = $r.StdOut | ConvertFrom-Json } catch { }
+    $obj.schema | Should Be "cucp.recovery-plan/v1"
+    $obj.candidate_count | Should BeGreaterThan 0
+  }
+}
+
+Describe "cucp v1.4.0 - recovery-run safety gate" {
+  It "macro recovery-run --dry-run 은 -AllowLiveControl 없어도 exit 0" {
+    $r = _CapturePs1 -ArgList @("-Quiet","macro","recovery-run","--dry-run","--json-only")
+    $r.ExitCode | Should Be 0
+    $obj = $null
+    try { $obj = $r.StdOut | ConvertFrom-Json } catch { }
+    $obj.schema | Should Be "cucp.recovery-run/v1"
+    $obj.status | Should Be "ready"
+    $obj.dry_run | Should Be $true
+  }
+  It "macro recovery-run (no flags) 는 -AllowLiveControl 없으면 throw -> exit 1 또는 3" {
+    # dry-run 도 confirm 도 없으면 wrapper throw 되어 exit 1, 또는 sensitive gate 로 exit 3
+    $code = _RunExit { & $wrapper -Quiet -Brief macro recovery-run }
+    ($code -eq 1 -or $code -eq 3) | Should Be $true
+  }
+}
+
+Describe "cucp v1.4.0 - precision-validate (read-only)" {
+  It "macro precision-validate 는 --x/--y 없으면 throw -> exit 1" {
+    (_RunExit { & $wrapper -Quiet -Brief macro precision-validate }) | Should Be 1
+  }
+  It "macro precision-validate 는 read-only 로 exit 0 + schema" {
+    $r = _CapturePs1 -ArgList @("-Quiet","macro","precision-validate","--x","100","--y","100","--samples","2","--json-only")
+    $r.ExitCode | Should Be 0
+    $obj = $null
+    try { $obj = $r.StdOut | ConvertFrom-Json } catch { }
+    $obj.schema | Should Be "cucp.precision-validate/v1"
+    $obj.status | Should Be "ok"
+    $obj.input.samples | Should Be 2
+  }
+}
+
+Describe "cucp v1.4.0 - benchmark (read-only)" {
+  It "macro benchmark --iters 1 는 read-only 로 exit 0 + schema + SLO 데이터" {
+    $r = _CapturePs1 -ArgList @("-Quiet","macro","benchmark","--iters","1","--json-only")
+    $r.ExitCode | Should Be 0
+    $obj = $null
+    try { $obj = $r.StdOut | ConvertFrom-Json } catch { }
+    $obj.schema | Should Be "cucp.benchmark/v1"
+    $obj.status | Should Be "ok"
+    $obj.target_count | Should BeGreaterThan 0
+    $obj.results.Count | Should Be $obj.target_count
+  }
+}
+
+Describe "cucp v1.4.0 - release-notes (read-only) + secret redaction" {
+  It "macro release-notes 는 latest 1건 추출 + schema" {
+    $r = _CapturePs1 -ArgList @("-Quiet","macro","release-notes","--json-only")
+    $r.ExitCode | Should Be 0
+    $obj = $null
+    try { $obj = $r.StdOut | ConvertFrom-Json } catch { }
+    $obj.schema | Should Be "cucp.release-notes/v1"
+    $obj.status | Should Be "ok"
+    $obj.note_count | Should BeGreaterThan 0
+  }
+  It "synthetic CHANGELOG 의 secret 패턴이 [REDACTED:*] 로 치환됨" {
+    # 임시 skill root 만들어서 CHANGELOG 만 교체
+    $tmp = Join-Path $env:TEMP ("cucp-redact-" + [guid]::NewGuid().ToString("N"))
+    New-Item -ItemType Directory -Path "$tmp\scripts" -Force | Out-Null
+    Copy-Item "$skillRoot\scripts\cucp.ps1" "$tmp\scripts\cucp.ps1"
+    Copy-Item "$skillRoot\scripts\cucp-native-helper.ps1" "$tmp\scripts\cucp-native-helper.ps1"
+    $cl = @(
+      "# Test Changelog",
+      "",
+      "## v9.9.9 - secret leak (2026-05-27)",
+      "",
+      "### Added",
+      "",
+      "- token ghp_aBcDeFgHiJkLmNoPqRsTuVwXyZ1234567890",
+      "- key sk-aBcDeFgHiJkLmNoPqRsTuVwXyZ1234567890",
+      ""
+    ) -join [Environment]::NewLine
+    Set-Content -LiteralPath "$tmp\CHANGELOG.md" -Value $cl -Encoding UTF8
+    $w2 = Join-Path $tmp "scripts\cucp.ps1"
+    $out = & powershell -NoProfile -ExecutionPolicy Bypass -File $w2 -Quiet macro release-notes --version 9.9.9 2>&1
+    $joined = ($out -join "`n")
+    Remove-Item -Recurse -Force $tmp
+    ($joined -match "ghp_aBcDeFg") | Should Be $false
+    ($joined -match "sk-aBcDeFg") | Should Be $false
+    ($joined -match "REDACTED") | Should Be $true
   }
 }

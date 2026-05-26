@@ -56,8 +56,10 @@ param(
   # 수행할 동작 — windows / focused / focus / screenshot / click / type /
   # shortcut / uia-tree / uia-find / uia-click / uia-invoke / uia-set-value /
   # uia-toggle / ocr-screen / ocr-image / ocr-find-text / ocr-uia-fuse /
-  # ocr-uia-invoke / screenshot-diff / hit-test / cdp-detect / cdp-eval /
-  # cdp-type / cdp-click / health
+  # ocr-uia-invoke / screenshot-diff / hit-test / hit-scan / cdp-detect / cdp-eval /
+  # cdp-type / cdp-click / cdp-smart-click / cdp-smart-type / cdp-smart-find / cdp-smart-type-find / health
+  # v1.4.0: ime-paste (한국어 IME 우회 클립보드 paste), modal-detect (UI recovery),
+  #         cdp-deep-find (Shadow DOM/iframe 깊이 보고)
   [Parameter(Mandatory = $true)]
   [ValidateSet(
     "windows", "focused", "focus", "screenshot",
@@ -66,8 +68,11 @@ param(
     "uia-invoke", "uia-set-value", "uia-toggle",
     "ocr-screen", "ocr-image", "ocr-find-text",
     "ocr-uia-fuse", "ocr-uia-invoke", "screenshot-diff",
-    "hit-test",
+    "hit-test", "hit-scan",
     "cdp-detect", "cdp-eval", "cdp-type", "cdp-click",
+    "cdp-smart-click", "cdp-smart-type", "cdp-smart-find", "cdp-smart-type-find",
+    "cdp-deep-find",
+    "ime-paste", "modal-detect",
     "health"
   )]
   [string]$Action,
@@ -118,17 +123,25 @@ param(
   # 매칭 안 되면 exit 3 (safety blocked) + 기록.
   [int]$TargetHwnd,
   [string]$TargetMatch,
+  [ValidateSet("none", "uia-safe")]
+  [string]$ClickRefine = "none",
+  [int]$ClickInset = 3,
+  [int]$ScanRadius = 0,
+  [int]$ScanStep = 6,
+  [switch]$SkipUia,
 
   # v1.3.0: CDP 옵션
   # - CdpPort: Electron debug port (기본 9222)
   # - CdpPageMatch: /json/list 의 title 또는 url 부분 매칭 (Electron 앱은 보통 여러 페이지)
   # - CdpSelector: cdp-type / cdp-click 의 DOM 셀렉터 (예: "textarea", "button.send")
+  # - CdpText: cdp-smart-click / cdp-smart-type / cdp-smart-find / cdp-smart-type-find 의 visible text/aria/placeholder label
   # - CdpExpr: cdp-eval 의 JavaScript expression
   # - CdpExprB64: cdp-eval 의 JavaScript expression (base64 인코딩, 긴 expression 또는
   #   특수문자 (`;` `:` `&`) 가 PowerShell argument parsing 에서 깨질 때 사용)
   [int]$CdpPort = 9222,
   [string]$CdpPageMatch,
   [string]$CdpSelector,
+  [string]$CdpText,
   [string]$CdpExpr,
   [string]$CdpExprB64,
 
@@ -136,12 +149,12 @@ param(
   # - OcrLanguage: "ko" / "en-US" — 비어있으면 사용자 언어 자동 선택 (TryCreateFromUserProfileLanguages)
   # - OcrPath: ocr-image 입력 PNG 경로
   # - OcrText: ocr-find-text 검색어 (case-insensitive 부분 일치 / score 매칭)
-  # - OcrMatch: ocr-find-text 매칭 모드 (exact / contains / prefix). 기본 contains
+  # - OcrMatch: ocr-find-text 매칭 모드 (exact / contains / prefix / fuzzy). 기본 contains
   # - OcrMaxCandidates: ocr-find-text 결과 후보 최대 개수
   [string]$OcrLanguage,
   [string]$OcrPath,
   [string]$OcrText,
-  [ValidateSet("exact", "contains", "prefix")]
+  [ValidateSet("exact", "contains", "prefix", "fuzzy")]
   [string]$OcrMatch = "contains",
   [int]$OcrMaxCandidates = 8,
 
@@ -209,6 +222,9 @@ public static class CucpNative {
 
   [DllImport("user32.dll")]
   public static extern bool IsIconic(IntPtr hWnd);
+
+  [DllImport("user32.dll")]
+  public static extern bool SetProcessDPIAware();
 
   [DllImport("user32.dll")]
   public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint lpdwProcessId);
@@ -473,6 +489,7 @@ public static class CucpNative {
 }
 "@
     Add-Type -TypeDefinition $signature -Language CSharp -ErrorAction Stop
+    try { [void][CucpNative]::SetProcessDPIAware() } catch { }
     $Script:_Win32Loaded = $true
     return $true
   } catch {
@@ -490,6 +507,7 @@ function _Ensure-UIA {
   try {
     Add-Type -AssemblyName UIAutomationClient -ErrorAction Stop
     Add-Type -AssemblyName UIAutomationTypes -ErrorAction Stop
+    Add-Type -AssemblyName WindowsBase -ErrorAction Stop
     $Script:_UIALoaded = $true
     return $true
   } catch {
@@ -625,30 +643,84 @@ function _Convert-OcrResult {
   }
 }
 
-# ocr-find-text 매칭 점수 계산. 0~100 사이.
-# - exact 일치: 100
-# - prefix 일치: 80
-# - contains 일치: 60 + (needle_len / line_len) * 20
-# - whitespace 정규화 후 비교
+# ocr-find-text matching score. 0..100.
+# exact/prefix/contains stay deterministic; fuzzy is opt-in to avoid unsafe clicks.
+function _Normalize-OcrText {
+  param([string]$Text)
+  if (-not $Text) { return "" }
+  $s = $Text
+  try { $s = $s.Normalize([System.Text.NormalizationForm]::FormKC) } catch { }
+  $s = $s.ToLowerInvariant()
+  $s = $s -replace '[^\p{L}\p{Nd}\s]+', ' '
+  $s = $s -replace '\s+', ' '
+  return $s.Trim()
+}
+
+function _Levenshtein-Distance {
+  param([string]$A, [string]$B)
+  if ($null -eq $A) { $A = "" }
+  if ($null -eq $B) { $B = "" }
+  $n = $A.Length
+  $m = $B.Length
+  if ($n -eq 0) { return $m }
+  if ($m -eq 0) { return $n }
+  $prev = New-Object 'int[]' ($m + 1)
+  $curr = New-Object 'int[]' ($m + 1)
+  for ($j = 0; $j -le $m; $j++) { $prev[$j] = $j }
+  for ($i = 1; $i -le $n; $i++) {
+    $curr[0] = $i
+    for ($j = 1; $j -le $m; $j++) {
+      $cost = 1
+      if ($A[$i - 1] -eq $B[$j - 1]) { $cost = 0 }
+      $del = $prev[$j] + 1
+      $ins = $curr[$j - 1] + 1
+      $sub = $prev[$j - 1] + $cost
+      $curr[$j] = [math]::Min([math]::Min($del, $ins), $sub)
+    }
+    $tmp = $prev; $prev = $curr; $curr = $tmp
+  }
+  return $prev[$m]
+}
+
+function _Similarity-Percent {
+  param([string]$A, [string]$B)
+  if (-not $A -or -not $B) { return 0 }
+  $maxLen = [math]::Max($A.Length, $B.Length)
+  if ($maxLen -le 0) { return 0 }
+  $dist = _Levenshtein-Distance -A $A -B $B
+  $score = [int][math]::Round((1.0 - ($dist / [double]$maxLen)) * 100)
+  if ($score -lt 0) { return 0 }
+  if ($score -gt 100) { return 100 }
+  return $score
+}
+
 function _Score-OcrText {
   param([string]$Needle, [string]$Hay, [string]$Mode)
   if (-not $Needle -or -not $Hay) { return 0 }
-  $n = ($Needle -replace '\s+', ' ').Trim().ToLowerInvariant()
-  $h = ($Hay -replace '\s+', ' ').Trim().ToLowerInvariant()
+  $n = _Normalize-OcrText $Needle
+  $h = _Normalize-OcrText $Hay
   if (-not $n -or -not $h) { return 0 }
   if ($n -eq $h) { return 100 }
   switch ($Mode) {
-    "exact"    { if ($n -eq $h) { return 100 } else { return 0 } }
-    "prefix"   { if ($h.StartsWith($n)) { return 80 } else { return 0 } }
+    "exact"  { if ($n -eq $h) { return 100 } else { return 0 } }
+    "prefix" { if ($h.StartsWith($n)) { return 80 } else { return 0 } }
+    "fuzzy"  {
+      $best = _Similarity-Percent -A $n -B $h
+      if ($h.Contains($n)) {
+        $ratio = [math]::Min(1.0, $n.Length / [math]::Max(1, $h.Length))
+        $containsScore = 55 + [int]([math]::Floor($ratio * 30))
+        if ($containsScore -gt $best) { $best = $containsScore }
+      }
+      return $best
+    }
     default {
-      # contains
       $idx = $h.IndexOf($n)
       if ($idx -lt 0) { return 0 }
       $ratio = [math]::Min(1.0, $n.Length / [math]::Max(1, $h.Length))
       $bonus = [int]([math]::Floor($ratio * 30))
       $score = 50 + $bonus
-      if ($idx -eq 0) { $score += 10 }   # 라인 맨 앞에 있으면 가중
-      if ($score -gt 95) { $score = 95 } # contains는 100 미만
+      if ($idx -eq 0) { $score += 10 }
+      if ($score -gt 95) { $score = 95 }
       return $score
     }
   }
@@ -699,48 +771,358 @@ function _Capture-ScreenRegionToTempPng {
     "$Prefix-$([System.Guid]::NewGuid().ToString('N')).png")
   $bmp = New-Object System.Drawing.Bitmap $sw, $sh
   $g = [System.Drawing.Graphics]::FromImage($bmp)
-  try { $g.CopyFromScreen($sx, $sy, 0, 0, (New-Object System.Drawing.Size $sw, $sh)) }
-  finally { $g.Dispose() }
-  $bmp.Save($tmp, [System.Drawing.Imaging.ImageFormat]::Png)
-  $bmp.Dispose()
+  try {
+    $g.CopyFromScreen($sx, $sy, 0, 0, (New-Object System.Drawing.Size $sw, $sh))
+    $bmp.Save($tmp, [System.Drawing.Imaging.ImageFormat]::Png)
+  } catch {
+    return [pscustomobject]@{
+      Path = $null; X = $sx; Y = $sy; W = $sw; H = $sh
+      Error = "screenshot_unavailable"; Detail = $_.Exception.Message
+    }
+  } finally {
+    $g.Dispose()
+    $bmp.Dispose()
+  }
   return [pscustomobject]@{
     Path = $tmp; X = $sx; Y = $sy; W = $sw; H = $sh; Error = $null
   }
 }
 
-# _Convert-OcrResult 가 만든 body 에서 needle 매칭 후보들을 추출.
-# 각 후보는 line 또는 word 단위. 결과는 score 내림차순 정렬된 배열.
-# 호출자가 max-N 절단을 한다.
+# _Convert-OcrResult body -> OCR candidates.
+# Includes line, word, and adjacent 2/3-word n-grams so labels like
+# "Save As" or "Send Message" get a tighter center than the whole line.
 function _Match-OcrCandidates {
   param(
     $Body,        # _Convert-OcrResult 결과 (lines 배열 포함)
     [string]$Needle,
-    [string]$Mode # exact / contains / prefix
+    [string]$Mode # exact / contains / prefix / fuzzy
   )
-  $cands = @()
+  $cands = New-Object System.Collections.ArrayList
+  $normalizedNeedle = _Normalize-OcrText $Needle
+  $needleTokenCount = 0
+  if ($normalizedNeedle) {
+    $needleTokenCount = @($normalizedNeedle -split '\s+' | Where-Object { $_ }).Count
+  }
+  $needsNgrams = ($needleTokenCount -ge 2)
   foreach ($line in $Body.lines) {
     $ls = _Score-OcrText -Needle $Needle -Hay $line.text -Mode $Mode
     if ($ls -gt 0) {
-      $cands += [ordered]@{
+      [void]$cands.Add([ordered]@{
         scope="line"; score=$ls; text=$line.text
         x=$line.x; y=$line.y; w=$line.w; h=$line.h
         cx=$line.cx; cy=$line.cy
-      }
+      })
     }
     foreach ($w in $line.words) {
       $ws = _Score-OcrText -Needle $Needle -Hay $w.text -Mode $Mode
       if ($ws -gt 0) {
-        $cands += [ordered]@{
+        [void]$cands.Add([ordered]@{
           scope="word"; score=$ws; text=$w.text
           x=$w.x; y=$w.y; w=$w.w; h=$w.h
           cx=$w.cx; cy=$w.cy
+        })
+      }
+    }
+    if (-not $needsNgrams) { continue }
+    $words = @($line.words)
+    for ($n = 2; $n -le 3; $n++) {
+      if ($words.Count -lt $n) { continue }
+      for ($i = 0; $i -le ($words.Count - $n); $i++) {
+        $slice = @($words[$i..($i + $n - 1)])
+        $text = (($slice | ForEach-Object { $_.text }) -join " ")
+        $score = _Score-OcrText -Needle $Needle -Hay $text -Mode $Mode
+        if ($score -le 0) { continue }
+        $x1 = [double]::MaxValue
+        $y1 = [double]::MaxValue
+        $x2 = [double]::MinValue
+        $y2 = [double]::MinValue
+        foreach ($w in $slice) {
+          if ([double]$w.x -lt $x1) { $x1 = [double]$w.x }
+          if ([double]$w.y -lt $y1) { $y1 = [double]$w.y }
+          if (([double]$w.x + [double]$w.w) -gt $x2) { $x2 = [double]$w.x + [double]$w.w }
+          if (([double]$w.y + [double]$w.h) -gt $y2) { $y2 = [double]$w.y + [double]$w.h }
         }
+        $ww = [int]($x2 - $x1)
+        $hh = [int]($y2 - $y1)
+        [void]$cands.Add([ordered]@{
+          scope="word_ngram"; n=$n; score=$score; text=$text
+          x=[int]$x1; y=[int]$y1; w=$ww; h=$hh
+          cx=[int]($x1 + ($ww / 2)); cy=[int]($y1 + ($hh / 2))
+        })
       }
     }
   }
   # PS 5.x 함정: single ordered-hashtable 의 [0] 은 첫 entry value 반환.
   # @() 로 강제 array 화 후 인덱싱.
-  return @($cands | Sort-Object -Property score -Descending)
+  return @($cands | Sort-Object -Property `
+    @{ Expression={ [int]$_["score"] }; Descending=$true },
+    @{ Expression={
+        $scope = "$($_["scope"])"
+        if ($scope -eq "word_ngram") { return 0 }
+        if ($scope -eq "word") { return 1 }
+        return 2
+      }; Ascending=$true },
+    @{ Expression={
+        $w = 0; $h = 0
+        try { $w = [int]$_["w"] } catch { }
+        try { $h = [int]$_["h"] } catch { }
+        return ($w * $h)
+      }; Ascending=$true })
+}
+
+function _Get-UiaSupportedPatternName {
+  param($Element)
+  if (-not $Element) { return $null }
+  try {
+    $p = $Element.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern)
+    if ($p) { return "InvokePattern" }
+  } catch { }
+  try {
+    $p = $Element.GetCurrentPattern([System.Windows.Automation.TogglePattern]::Pattern)
+    if ($p) { return "TogglePattern" }
+  } catch { }
+  try {
+    $p = $Element.GetCurrentPattern([System.Windows.Automation.SelectionItemPattern]::Pattern)
+    if ($p) { return "SelectionItemPattern" }
+  } catch { }
+  return $null
+}
+
+function _New-UiaMatchPayload {
+  param($Cur, [string]$PatternName)
+  $r = $Cur.BoundingRectangle
+  $name = ""; try { $name = "$($Cur.Name)" } catch { }
+  $autoId = ""; try { $autoId = "$($Cur.AutomationId)" } catch { }
+  $localizedRole = ""; try { $localizedRole = $Cur.LocalizedControlType } catch { }
+  $clazz = ""; try { $clazz = "$($Cur.ClassName)" } catch { }
+  $enabled = $true; try { $enabled = [bool]$Cur.IsEnabled } catch { }
+  $offscreen = $false; try { $offscreen = [bool]$Cur.IsOffscreen } catch { }
+  $preferredId = "none"
+  if ($name -and $name.Trim().Length -gt 0) { $preferredId = "name" }
+  elseif ($autoId -and $autoId.Trim().Length -gt 0) { $preferredId = "automation_id" }
+  elseif ($clazz -and $clazz.Trim().Length -gt 0) { $preferredId = "class_name" }
+  return [ordered]@{
+    name = $name
+    automation_id = $autoId
+    class_name = $clazz
+    role = $localizedRole
+    rect = [ordered]@{ x=[int]$r.X; y=[int]$r.Y; width=[int]$r.Width; height=[int]$r.Height }
+    center = [ordered]@{ x=[int]($r.X + $r.Width / 2); y=[int]($r.Y + $r.Height / 2) }
+    area = [int]($r.Width * $r.Height)
+    is_enabled = $enabled
+    is_offscreen = $offscreen
+    invoke_pattern = $PatternName
+    preferred_identifier = $preferredId
+  }
+}
+
+function _Get-RoleWeight {
+  param([string]$Role)
+  if (-not $Role) { return 0 }
+  $r = $Role.ToLowerInvariant()
+  if ($r -match 'button|hyperlink|menu item|tab|check|radio|combo|split button') { return 40 }
+  if ($r -match 'edit|document|list item|tree item|data item') { return 18 }
+  if ($r -match 'pane|window|group|custom') { return -8 }
+  return 0
+}
+
+function _Clamp-UiaPointToRect {
+  param(
+    [double]$X,
+    [double]$Y,
+    $Rect,
+    [int]$Inset = 3,
+    [string]$Source = "center",
+    [bool]$NativeClickable = $false
+  )
+  if (-not $Rect -or $Rect.IsEmpty -or $Rect.Width -le 0 -or $Rect.Height -le 0) { return $null }
+  $safeInset = [Math]::Max(0, $Inset)
+  $insetX = [Math]::Min([double]$safeInset, [Math]::Max(0.0, ([double]$Rect.Width - 1.0) / 2.0))
+  $insetY = [Math]::Min([double]$safeInset, [Math]::Max(0.0, ([double]$Rect.Height - 1.0) / 2.0))
+  $minX = [double]$Rect.X + $insetX
+  $maxX = [double]$Rect.X + [double]$Rect.Width - $insetX
+  $minY = [double]$Rect.Y + $insetY
+  $maxY = [double]$Rect.Y + [double]$Rect.Height - $insetY
+  if ($maxX -lt $minX) { $minX = [double]$Rect.X + ([double]$Rect.Width / 2.0); $maxX = $minX }
+  if ($maxY -lt $minY) { $minY = [double]$Rect.Y + ([double]$Rect.Height / 2.0); $maxY = $minY }
+  $cx = [Math]::Max($minX, [Math]::Min($maxX, $X))
+  $cy = [Math]::Max($minY, [Math]::Min($maxY, $Y))
+  return [pscustomobject]@{
+    X = [int][Math]::Round($cx)
+    Y = [int][Math]::Round($cy)
+    Source = $Source
+    NativeClickable = $NativeClickable
+  }
+}
+
+function _Get-UiaPreferredClickPoint {
+  param(
+    $Element,
+    $Rect,
+    [int]$Inset = 3
+  )
+  if (-not $Element -or -not $Rect -or $Rect.IsEmpty) { return $null }
+
+  try {
+    $pt = New-Object System.Windows.Point
+    $ok = $Element.TryGetClickablePoint([ref]$pt)
+    if ($ok) {
+      return (_Clamp-UiaPointToRect -X ([double]$pt.X) -Y ([double]$pt.Y) -Rect $Rect -Inset $Inset -Source "clickable_point" -NativeClickable $true)
+    }
+  } catch { }
+
+  $centerX = [double]$Rect.X + ([double]$Rect.Width / 2.0)
+  $centerY = [double]$Rect.Y + ([double]$Rect.Height / 2.0)
+  return (_Clamp-UiaPointToRect -X $centerX -Y $centerY -Rect $Rect -Inset $Inset -Source "rect_center" -NativeClickable $false)
+}
+
+function _Resolve-UiaPointRefinement {
+  param(
+    [int]$X,
+    [int]$Y,
+    [int]$MaxWidth = 360,
+    [int]$MaxHeight = 220,
+    [int]$Inset = 3
+  )
+  if (-not (_Ensure-UIA)) { return $null }
+  try {
+    $pt = New-Object System.Windows.Point($X, $Y)
+    $el = [System.Windows.Automation.AutomationElement]::FromPoint($pt)
+  } catch { return $null }
+  if (-not $el) { return $null }
+
+  $walker = [System.Windows.Automation.TreeWalker]::ControlViewWalker
+  $best = $null
+  for ($depth = 0; $depth -le 5 -and $el; $depth++) {
+    try {
+      $cur = $el.Current
+      $r = $cur.BoundingRectangle
+      if (-not $r.IsEmpty -and $r.Width -gt 1 -and $r.Height -gt 1) {
+        $pattern = _Get-UiaSupportedPatternName -Element $el
+        $role = ""; try { $role = "$($cur.LocalizedControlType)" } catch { }
+        $enabled = $true; try { $enabled = [bool]$cur.IsEnabled } catch { }
+        $offscreen = $false; try { $offscreen = [bool]$cur.IsOffscreen } catch { }
+        $area = [double]($r.Width * $r.Height)
+        $bounded = ($r.Width -le $MaxWidth -and $r.Height -le $MaxHeight)
+        $roleWeight = _Get-RoleWeight -Role $role
+        $score = 0
+        if ($pattern) { $score += 80 }
+        $score += $roleWeight
+        if ($bounded) { $score += 30 } else { $score -= 45 }
+        if ($enabled) { $score += 10 } else { $score -= 40 }
+        if ($offscreen) { $score -= 60 }
+        if ($depth -gt 0) { $score -= ($depth * 4) }
+        if ($area -le 800) { $score += 10 }
+        if ($area -gt 120000) { $score -= 30 }
+
+        $point = $null
+        try { $point = _Get-UiaPreferredClickPoint -Element $el -Rect $r -Inset $Inset } catch { $point = $null }
+        if ($point -and $point.NativeClickable) { $score += 8 }
+
+        if ($score -ge 45 -and $point) {
+          $payload = _New-UiaMatchPayload -Cur $cur -PatternName $pattern
+          $candidate = [pscustomobject]@{
+            X = [int]$point.X
+            Y = [int]$point.Y
+            Score = $score
+            Depth = $depth
+            PatternName = $pattern
+            Role = $role
+            Area = $area
+            PointSource = $point.Source
+            NativeClickable = [bool]$point.NativeClickable
+            Match = $payload
+          }
+          if (-not $best -or $candidate.Score -gt $best.Score) { $best = $candidate }
+        }
+      }
+      $parent = $null
+      try { $parent = $walker.GetParent($el) } catch { $parent = $null }
+      if (-not $parent) { break }
+      $el = $parent
+    } catch { break }
+  }
+  return $best
+}
+
+function _Find-SmallestUiaElementAtPoint {
+  param($Elements, [int]$X, [int]$Y)
+  $bestArea = [double]::MaxValue
+  $bestEl = $null
+  $bestCur = $null
+  foreach ($el in $Elements) {
+    try {
+      $cur = $el.Current
+      $r = $cur.BoundingRectangle
+      if ($r.IsEmpty) { continue }
+      if ($X -lt $r.X -or $X -gt ($r.X + $r.Width)) { continue }
+      if ($Y -lt $r.Y -or $Y -gt ($r.Y + $r.Height)) { continue }
+      $area = [double]($r.Width * $r.Height)
+      if ($area -lt $bestArea) {
+        $bestArea = $area
+        $bestEl = $el
+        $bestCur = $cur
+      }
+    } catch { continue }
+  }
+  if (-not $bestEl) { return $null }
+  return [pscustomobject]@{ Element=$bestEl; Current=$bestCur; Area=$bestArea }
+}
+
+function _Resolve-OcrUiaFusionCandidate {
+  param(
+    $RootEl,
+    $Elements,
+    [object[]]$OcrCandidates,
+    [int]$Limit = 8
+  )
+  $results = @()
+  $walker = [System.Windows.Automation.TreeWalker]::ControlViewWalker
+  $limited = @($OcrCandidates | Select-Object -First $Limit)
+  foreach ($ocr in $limited) {
+    $cx = [int]$ocr.cx
+    $cy = [int]$ocr.cy
+    $hit = _Find-SmallestUiaElementAtPoint -Elements $Elements -X $cx -Y $cy
+    if (-not $hit) { continue }
+    $el = $hit.Element
+    for ($depth = 0; $depth -le 6 -and $el; $depth++) {
+      try {
+        $cur = $el.Current
+        $r = $cur.BoundingRectangle
+        if ($r.IsEmpty) { break }
+        $pattern = _Get-UiaSupportedPatternName -Element $el
+        $payload = _New-UiaMatchPayload -Cur $cur -PatternName $pattern
+        $role = ""; try { $role = "$($cur.LocalizedControlType)" } catch { }
+        $enabled = $true; try { $enabled = [bool]$cur.IsEnabled } catch { }
+        $offscreen = $false; try { $offscreen = [bool]$cur.IsOffscreen } catch { }
+        $fusionScore = [int]$ocr.score
+        if ($pattern) { $fusionScore += 100 }
+        if ($role -match 'button|menu|hyperlink|tab|list item|check|radio') { $fusionScore += 20 }
+        if ($enabled) { $fusionScore += 10 } else { $fusionScore -= 20 }
+        if ($offscreen) { $fusionScore -= 30 }
+        if ($depth -gt 0) { $fusionScore -= ($depth * 3) }
+        $results += [pscustomobject]@{
+          Ocr = $ocr
+          Element = $el
+          Current = $cur
+          PatternName = $pattern
+          CanInvoke = [bool]$pattern
+          UiaMatch = $payload
+          FusionScore = $fusionScore
+          ParentClimbDepth = $depth
+        }
+        if ($pattern) { break }
+        $parent = $null
+        try { $parent = $walker.GetParent($el) } catch { $parent = $null }
+        if (-not $parent) { break }
+        try { if ($parent.Equals($RootEl)) { break } } catch { }
+        $el = $parent
+      } catch { break }
+    }
+  }
+  $ranked = @($results | Sort-Object -Property @{Expression="CanInvoke";Descending=$true}, @{Expression="FusionScore";Descending=$true}, @{Expression={ [int]$_.Ocr.score };Descending=$true})
+  if ($ranked.Count -gt 0) { return $ranked[0] }
+  return $null
 }
 
 # ============================================================================
@@ -770,6 +1152,11 @@ function _Cdp-HttpGet {
     $req = [System.Net.WebRequest]::Create($Url)
     $req.Method = "GET"
     $req.Timeout = $TimeoutMs
+    try {
+      $req.Proxy = $null
+      $req.ReadWriteTimeout = $TimeoutMs
+      $req.KeepAlive = $false
+    } catch { }
     $resp = $req.GetResponse()
     $reader = New-Object System.IO.StreamReader $resp.GetResponseStream()
     $body = $reader.ReadToEnd()
@@ -845,11 +1232,103 @@ function _Cdp-WsCall {
   }
 }
 
+function _Cdp-PortOpen {
+  param([int]$Port = 9222, [int]$TimeoutMs = 120)
+  $client = New-Object System.Net.Sockets.TcpClient
+  $handle = $null
+  try {
+    $iar = $client.BeginConnect("127.0.0.1", $Port, $null, $null)
+    $handle = $iar.AsyncWaitHandle
+    if (-not $handle.WaitOne($TimeoutMs, $false)) { return $false }
+    $client.EndConnect($iar)
+    return [bool]$client.Connected
+  } catch {
+    return $false
+  } finally {
+    try { if ($handle) { $handle.Close() } } catch { }
+    try { $client.Close() } catch { }
+    try { $client.Dispose() } catch { }
+  }
+}
+
+function _Cdp-NewDomBridgePlan {
+  param(
+    [ValidateSet("click", "type", "find")]
+    [string]$DomAction,
+    [string]$Query,
+    [int]$Port = 9222,
+    [string]$PageMatch,
+    [string]$TextToType,
+    [bool]$Clear,
+    [bool]$Enter
+  )
+  $readOnlyAction = if ($DomAction -eq "type") { "cdp-smart-type-find" } else { "cdp-smart-find" }
+  $liveAction = if ($DomAction -eq "type") { "cdp-smart-type" } else { "cdp-smart-click" }
+  $readOnlyCommand = @("macro", $readOnlyAction)
+  $liveCommand = @("macro", $liveAction)
+  if ($DomAction -eq "type") {
+    $readOnlyCommand += @("--label", $Query)
+    $liveCommand += @("--label", $Query)
+    if ($TextToType) { $liveCommand += @("--text", $TextToType) }
+    if ($Clear) { $liveCommand += "--clear-first" }
+    if ($Enter) { $liveCommand += "--press-enter" }
+  } else {
+    $readOnlyCommand += @("--text", $Query)
+    $liveCommand += @("--text", $Query)
+  }
+  $readOnlyCommand += @("--port", "$Port")
+  $liveCommand += @("--port", "$Port")
+  if ($PageMatch) {
+    $readOnlyCommand += @("--page-match", $PageMatch)
+    $liveCommand += @("--page-match", $PageMatch)
+  }
+
+  $locatorHints = @()
+  if ($DomAction -eq "type") {
+    $locatorHints += [ordered]@{ kind="playwright_label"; template="page.getByLabel(<query>)"; priority=100 }
+    $locatorHints += [ordered]@{ kind="playwright_placeholder"; template="page.getByPlaceholder(<query>)"; priority=92 }
+    $locatorHints += [ordered]@{ kind="css_textbox"; template="[role='textbox'], input, textarea, [contenteditable='true']"; priority=70 }
+  } else {
+    $locatorHints += [ordered]@{ kind="playwright_role_button"; template="page.getByRole('button', { name: <query> })"; priority=100 }
+    $locatorHints += [ordered]@{ kind="playwright_role_link"; template="page.getByRole('link', { name: <query> })"; priority=88 }
+    $locatorHints += [ordered]@{ kind="playwright_text"; template="page.getByText(<query>)"; priority=72 }
+  }
+
+  return [ordered]@{
+    schema = "cucp.cdp-dom-bridge-plan/v1"
+    route = "cdp_dom"
+    dom_action = $DomAction
+    query = $Query
+    port = $Port
+    page_match = $PageMatch
+    read_only_command = $readOnlyCommand
+    live_command = $liveCommand
+    locator_hints = $locatorHints
+    selector_ranking = @(
+      [ordered]@{ signal="test_id_or_data_attr"; priority=100 },
+      [ordered]@{ signal="aria_label_or_label_control"; priority=94 },
+      [ordered]@{ signal="role_plus_accessible_name"; priority=90 },
+      [ordered]@{ signal="placeholder_or_name"; priority=82 },
+      [ordered]@{ signal="visible_text"; priority=70 },
+      [ordered]@{ signal="css_fallback"; priority=50 }
+    )
+    fallback_order = @("cdp_dom", "uia_pattern", "ocr_uia", "target_validate_precision_point", "vision")
+  }
+}
+
 # CDP 자동 detect — 9222 포트 + Electron 앱 페이지 목록
 # 반환: { available, version, pages[] (id, title, url, webSocketDebuggerUrl) }
 function _Cdp-Detect {
   param([int]$Port = 9222)
-  $verResp = _Cdp-HttpGet -Url "http://127.0.0.1:$Port/json/version" -TimeoutMs 2000
+  if (-not (_Cdp-PortOpen -Port $Port -TimeoutMs 120)) {
+    return [pscustomobject]@{
+      available = $false
+      port = $Port
+      error = "tcp_port_closed_or_timeout"
+      pages = @()
+    }
+  }
+  $verResp = _Cdp-HttpGet -Url "http://127.0.0.1:$Port/json/version" -TimeoutMs 250
   if (-not $verResp.ok) {
     return [pscustomobject]@{
       available = $false
@@ -861,7 +1340,7 @@ function _Cdp-Detect {
   $version = $null
   try { $version = $verResp.body | ConvertFrom-Json } catch { }
 
-  $listResp = _Cdp-HttpGet -Url "http://127.0.0.1:$Port/json/list" -TimeoutMs 2000
+  $listResp = _Cdp-HttpGet -Url "http://127.0.0.1:$Port/json/list" -TimeoutMs 250
   $pages = @()
   if ($listResp.ok) {
     try {
@@ -1051,11 +1530,26 @@ function _Action-Screenshot {
   $sw = if ($ScreenshotW -gt 0) { $ScreenshotW } else { $vw }
   $sh = if ($ScreenshotH -gt 0) { $ScreenshotH } else { $vh }
 
-  $bmp = New-Object System.Drawing.Bitmap $sw, $sh
-  $g = [System.Drawing.Graphics]::FromImage($bmp)
+  $bmp = $null
+  $g = $null
   try {
+    $bmp = New-Object System.Drawing.Bitmap $sw, $sh
+    $g = [System.Drawing.Graphics]::FromImage($bmp)
     $g.CopyFromScreen($sx, $sy, 0, 0, (New-Object System.Drawing.Size $sw, $sh))
-  } finally { $g.Dispose() }
+  } catch {
+    if ($g) { $g.Dispose() }
+    if ($bmp) { $bmp.Dispose() }
+    _Emit ([ordered]@{
+      status = "partial"
+      reason = "screenshot_unavailable"
+      detail = $_.Exception.Message
+      recommended_action = "Run from an interactive unlocked desktop session, or retry with a smaller visible region."
+      out_path = $OutPath
+      rect = [ordered]@{ x=$sx; y=$sy; width=$sw; height=$sh }
+    }) 2
+  } finally {
+    if ($g) { $g.Dispose() }
+  }
 
   # 출력 폴더 생성
   $dir = Split-Path -Parent $OutPath
@@ -1166,6 +1660,10 @@ function _Action-HitTest {
   [void][CucpNative]::GetWindowThreadProcessId($rootHwnd, [ref]$procId)
   $procName = ""
   try { $procName = (Get-Process -Id $procId -ErrorAction SilentlyContinue).ProcessName } catch { }
+  $uiaPoint = $null
+  if (-not $SkipUia) {
+    try { $uiaPoint = _Resolve-UiaPointRefinement -X $X -Y $Y -Inset $ClickInset } catch { $uiaPoint = $null }
+  }
 
   # 매칭 검증 (TargetHwnd / TargetMatch 명시 시)
   $matched = $true
@@ -1186,7 +1684,7 @@ function _Action-HitTest {
     $exitCode = 2
   }
 
-  _Emit ([ordered]@{
+  $payload = [ordered]@{
     status = $statusStr
     x = $X; y = $Y
     child_hwnd = [int64]$childHwnd
@@ -1200,35 +1698,688 @@ function _Action-HitTest {
     target_match = $TargetMatch
     matched = $matched
     match_reason = $matchReason
-  }) $exitCode
+    uia_skipped = [bool]$SkipUia
+  }
+  if ($uiaPoint) {
+    $payload["uia_point"] = [ordered]@{
+      refined_x = [int]$uiaPoint.X
+      refined_y = [int]$uiaPoint.Y
+      score = [int]$uiaPoint.Score
+      role = $uiaPoint.Role
+      pattern = $uiaPoint.PatternName
+      point_source = $uiaPoint.PointSource
+      native_clickable = [bool]$uiaPoint.NativeClickable
+      match = $uiaPoint.Match
+    }
+  }
+  _Emit $payload $exitCode
+}
+
+function _Action-HitScan {
+  if (-not (_Ensure-Win32Native)) { _Emit @{status="error"; reason="win32_load_failed"} 1 }
+  if ($X -le 0 -or $Y -le 0) {
+    _Emit @{status="error"; reason="invalid_coords"; recommended_action="provide positive -X and -Y"} 1
+  }
+  if ($ScanRadius -lt 0) { $ScanRadius = 0 }
+  if ($ScanRadius -gt 64) { $ScanRadius = 64 }
+  if ($ScanStep -le 0) { $ScanStep = 6 }
+  if ($ScanStep -gt 16) { $ScanStep = 16 }
+  if ($ClickInset -le 0) { $ClickInset = 3 }
+
+  $swScan = [System.Diagnostics.Stopwatch]::StartNew()
+  $candidates = New-Object System.Collections.ArrayList
+  $sampleCount = 0
+  $targetMatchedSamples = 0
+  $offsets = New-Object System.Collections.ArrayList
+  [void]$offsets.Add(0)
+  for ($o = $ScanStep; $o -le $ScanRadius; $o += $ScanStep) {
+    [void]$offsets.Add(-$o)
+    [void]$offsets.Add($o)
+  }
+  if ($ScanRadius -gt 0 -and ($ScanRadius % $ScanStep) -ne 0) {
+    [void]$offsets.Add(-$ScanRadius)
+    [void]$offsets.Add($ScanRadius)
+  }
+  $offsets = @($offsets | Sort-Object -Unique)
+
+  foreach ($dy in $offsets) {
+    foreach ($dx in $offsets) {
+      $sx = $X + $dx
+      $sy = $Y + $dy
+      if ($sx -le 0 -or $sy -le 0) { continue }
+      $sampleCount++
+
+      $sampleHit = _Test-CoordsInTarget -X $sx -Y $sy -ExpectedHwnd $TargetHwnd -ExpectedMatch $TargetMatch
+      if (-not $sampleHit.matched) { continue }
+      $targetMatchedSamples++
+
+      $uiaPoint = $null
+      try { $uiaPoint = _Resolve-UiaPointRefinement -X $sx -Y $sy -Inset $ClickInset } catch { $uiaPoint = $null }
+      if (-not $uiaPoint) { continue }
+
+      $refinedHit = _Test-CoordsInTarget -X ([int]$uiaPoint.X) -Y ([int]$uiaPoint.Y) -ExpectedHwnd $TargetHwnd -ExpectedMatch $TargetMatch
+      if (-not $refinedHit.matched) { continue }
+
+      $identifier = ""
+      try { $identifier = "$($uiaPoint.Match.preferred_identifier)" } catch { $identifier = "" }
+      if (-not $identifier) {
+        try { $identifier = "$($uiaPoint.Match.name)|$($uiaPoint.Match.automation_id)|$($uiaPoint.Role)" } catch { $identifier = "$($uiaPoint.Role)" }
+      }
+      $key = "$identifier|$($uiaPoint.Role)|$($uiaPoint.PatternName)|$([int]$uiaPoint.X),$([int]$uiaPoint.Y)"
+      [void]$candidates.Add([pscustomobject]@{
+        key = $key
+        sample_x = $sx
+        sample_y = $sy
+        dx = $dx
+        dy = $dy
+        refined_x = [int]$uiaPoint.X
+        refined_y = [int]$uiaPoint.Y
+        score = [int]$uiaPoint.Score
+        role = "$($uiaPoint.Role)"
+        pattern = "$($uiaPoint.PatternName)"
+        point_source = "$($uiaPoint.PointSource)"
+        native_clickable = [bool]$uiaPoint.NativeClickable
+        depth = [int]$uiaPoint.Depth
+        area = [int]$uiaPoint.Area
+        match = $uiaPoint.Match
+      })
+    }
+  }
+
+  $groups = @{}
+  foreach ($c in @($candidates)) {
+    if (-not $groups.ContainsKey($c.key)) {
+      $groups[$c.key] = [pscustomobject]@{ count = 0; max_score = 0 }
+    }
+    $groups[$c.key].count = [int]$groups[$c.key].count + 1
+    if ([int]$c.score -gt [int]$groups[$c.key].max_score) { $groups[$c.key].max_score = [int]$c.score }
+  }
+
+  $ranked = New-Object System.Collections.ArrayList
+  foreach ($c in @($candidates)) {
+    $support = [int]$groups[$c.key].count
+    $dist = [Math]::Sqrt(([double](($c.refined_x - $X) * ($c.refined_x - $X))) + ([double](($c.refined_y - $Y) * ($c.refined_y - $Y))))
+    $distPenalty = [int][Math]::Round($dist)
+    $clickBonus = 0
+    if ($c.native_clickable) { $clickBonus += 12 }
+    if ($c.point_source -eq "clickable_point") { $clickBonus += 8 }
+    $finalScore = [int]$c.score + ($support * 7) + $clickBonus - $distPenalty
+    [void]$ranked.Add([pscustomobject]@{
+      sample_x = $c.sample_x
+      sample_y = $c.sample_y
+      dx = $c.dx
+      dy = $c.dy
+      refined_x = $c.refined_x
+      refined_y = $c.refined_y
+      final_score = $finalScore
+      base_score = $c.score
+      support = $support
+      distance_from_origin = $dist
+      role = $c.role
+      pattern = $c.pattern
+      point_source = $c.point_source
+      native_clickable = $c.native_clickable
+      depth = $c.depth
+      area = $c.area
+      match = $c.match
+    })
+  }
+
+  $ordered = @($ranked | Sort-Object -Property final_score, support, base_score -Descending)
+  $best = $null
+  if ($ordered.Count -gt 0) { $best = $ordered[0] }
+  $swScan.Stop()
+
+  if (-not $best) {
+    _Emit ([ordered]@{
+      status = "partial"
+      reason = "no_uia_candidate"
+      x = $X
+      y = $Y
+      radius = $ScanRadius
+      step = $ScanStep
+      click_inset = $ClickInset
+      target_hwnd = $TargetHwnd
+      target_match = $TargetMatch
+      sample_count = $sampleCount
+      target_matched_samples = $targetMatchedSamples
+      candidate_count = @($candidates).Count
+      elapsed_ms = [int]$swScan.Elapsed.TotalMilliseconds
+      recommended_action = "Try a slightly larger --radius, narrower --target-match, or DOM/UIA label route."
+    }) 2
+  }
+
+  $top = @($ordered | Select-Object -First 12)
+  _Emit ([ordered]@{
+    status = "ok"
+    x = $X
+    y = $Y
+    radius = $ScanRadius
+    step = $ScanStep
+    click_inset = $ClickInset
+    target_hwnd = $TargetHwnd
+    target_match = $TargetMatch
+    sample_count = $sampleCount
+    target_matched_samples = $targetMatchedSamples
+    candidate_count = @($candidates).Count
+    best = $best
+    recommended_point = [ordered]@{
+      x = [int]$best.refined_x
+      y = [int]$best.refined_y
+      point_source = $best.point_source
+      native_clickable = [bool]$best.native_clickable
+      confidence = if ($best.support -ge 4 -or $best.native_clickable) { "high" } elseif ($best.support -ge 2) { "medium" } else { "low" }
+    }
+    candidates = $top
+    elapsed_ms = [int]$swScan.Elapsed.TotalMilliseconds
+  }) 0
 }
 
 # ============================================================================
 # v1.3.0: CDP Actions
 # ============================================================================
+$Script:_LastCdpPageSelection = $null
+
+function _Cdp-ScorePages {
+  param(
+    [Parameter(Mandatory)]$Detect,
+    [string]$PageMatch
+  )
+  $out = New-Object System.Collections.ArrayList
+  $pages = @($Detect.pages)
+  $needle = ""
+  if ($PageMatch) { $needle = $PageMatch.ToLowerInvariant() }
+  foreach ($p in $pages) {
+    $title = if ($p.title) { "$($p.title)" } else { "" }
+    $url = if ($p.url) { "$($p.url)" } else { "" }
+    $type = if ($p.type) { "$($p.type)" } else { "" }
+    $titleLower = $title.ToLowerInvariant()
+    $urlLower = $url.ToLowerInvariant()
+    $score = 0
+    $reasons = New-Object System.Collections.ArrayList
+    if ($PageMatch) {
+      if ($titleLower -eq $needle -or $urlLower -eq $needle) {
+        $score += 140
+        [void]$reasons.Add("exact_page_match")
+      } elseif ($titleLower.Contains($needle) -or $urlLower.Contains($needle)) {
+        $score += 105
+        [void]$reasons.Add("substring_page_match")
+      } else {
+        $score -= 100
+        [void]$reasons.Add("page_match_miss")
+      }
+    }
+    if ($type -eq "page") {
+      $score += 45
+      [void]$reasons.Add("type_page")
+    } elseif ($type -eq "webview") {
+      $score += 42
+      [void]$reasons.Add("type_webview")
+    } elseif ($type -eq "iframe") {
+      $score -= 20
+      [void]$reasons.Add("type_iframe")
+    } elseif ($type -eq "worker" -or $type -eq "service_worker") {
+      $score -= 60
+      [void]$reasons.Add("type_worker")
+    }
+    if ($title) {
+      $score += 12
+      [void]$reasons.Add("has_title")
+    }
+    if ($urlLower.StartsWith("devtools://")) {
+      $score -= 80
+      [void]$reasons.Add("devtools_page_penalty")
+    } elseif ($urlLower.StartsWith("http") -or $urlLower.StartsWith("file:") -or $urlLower.StartsWith("app:")) {
+      $score += 8
+      [void]$reasons.Add("document_url")
+    }
+    [void]$out.Add([pscustomobject]@{
+      id = $p.id
+      title = $title
+      url = $url
+      type = $type
+      score = [int]$score
+      reasons = @($reasons)
+      page = $p
+    })
+  }
+  return @($out | Sort-Object @{ Expression = { -1 * [int]$_.score } }, @{ Expression = { $_.title } })
+}
+
 # CDP page 매칭 헬퍼 — title 또는 url 부분일치
 function _Cdp-FindPage {
   param(
     [Parameter(Mandatory)]$Detect,  # _Cdp-Detect 결과
     [string]$PageMatch
   )
+  $Script:_LastCdpPageSelection = $null
   if (-not $Detect.available) { return $null }
   $pages = $Detect.pages
   if (-not $pages -or @($pages).Count -eq 0) { return $null }
-  # PageMatch 명시 — 모든 type (page / webview / iframe / worker) 검색
-  if ($PageMatch) {
-    $needle = $PageMatch.ToLowerInvariant()
-    foreach ($p in $pages) {
-      $t = if ($p.title) { $p.title.ToLowerInvariant() } else { "" }
-      $u = if ($p.url) { $p.url.ToLowerInvariant() } else { "" }
-      if ($t.Contains($needle) -or $u.Contains($needle)) { return $p }
+  $scores = @(_Cdp-ScorePages -Detect $Detect -PageMatch $PageMatch)
+  if (-not $scores -or $scores.Count -eq 0) { return $null }
+  $selected = $scores[0]
+  if ($PageMatch -and ($selected.reasons -contains "page_match_miss")) {
+    $Script:_LastCdpPageSelection = [pscustomobject]@{
+      page_match = $PageMatch
+      selected = $null
+      candidates = @($scores | Select-Object -First 8 | ForEach-Object {
+        [pscustomobject]@{ id=$_.id; title=$_.title; url=$_.url; type=$_.type; score=$_.score; reasons=$_.reasons }
+      })
     }
     return $null
   }
-  # PageMatch 없음 — type=page 또는 webview 우선 (가장 흔한 케이스)
-  $pageTyped = @($pages | Where-Object { $_.type -eq "page" -or $_.type -eq "webview" })
-  if (@($pageTyped).Count -gt 0) { return $pageTyped[0] }
-  return $pages[0]
+  $Script:_LastCdpPageSelection = [pscustomobject]@{
+    page_match = $PageMatch
+    selected = [pscustomobject]@{ id=$selected.id; title=$selected.title; url=$selected.url; type=$selected.type; score=$selected.score; reasons=$selected.reasons }
+    candidates = @($scores | Select-Object -First 8 | ForEach-Object {
+      [pscustomobject]@{ id=$_.id; title=$_.title; url=$_.url; type=$_.type; score=$_.score; reasons=$_.reasons }
+    })
+  }
+  return $selected.page
+}
+
+function _Js-StringLiteral {
+  param([string]$Value)
+  if ($null -eq $Value) { return "null" }
+  return ($Value | ConvertTo-Json -Compress)
+}
+
+function _Cdp-RunSmartDomAction {
+  param(
+    [ValidateSet("click", "type")]
+    [string]$DomAction,
+    [string]$Needle,
+    [string]$TextToType,
+    [bool]$Clear,
+    [bool]$Enter,
+    [bool]$PlanOnly = $false
+  )
+  if (-not $Needle) {
+    _Emit @{status="error"; reason="missing_cdp_text"; recommended_action="provide -CdpText <visible text or label>"} 1
+  }
+  $bridgePlan = _Cdp-NewDomBridgePlan -DomAction $DomAction -Query $Needle -Port $CdpPort -PageMatch $CdpPageMatch -TextToType $TextToType -Clear $Clear -Enter $Enter
+  $detect = _Cdp-Detect -Port $CdpPort
+  if (-not $detect.available) {
+    _Emit @{status="partial"; reason="cdp_port_closed"; port=$CdpPort; detail=$detect.error; dom_bridge_plan=$bridgePlan} 2
+  }
+  $page = _Cdp-FindPage -Detect $detect -PageMatch $CdpPageMatch
+  if (-not $page) {
+    _Emit @{status="partial"; reason="no_matching_page"; page_match=$CdpPageMatch; available_pages=@($detect.pages); page_selection=$Script:_LastCdpPageSelection; dom_bridge_plan=$bridgePlan} 2
+  }
+
+  $needleJs = _Js-StringLiteral $Needle
+  $textJs = _Js-StringLiteral $TextToType
+  $actionJs = _Js-StringLiteral $DomAction
+  $clearJs = if ($Clear) { "true" } else { "false" }
+  $enterJs = if ($Enter) { "true" } else { "false" }
+  $planOnlyJs = if ($PlanOnly) { "true" } else { "false" }
+
+  $expr = @"
+(function(){
+  const action = $actionJs;
+  const needleRaw = $needleJs;
+  const textToType = $textJs || '';
+  const clearFirst = $clearJs;
+  const pressEnter = $enterJs;
+  const planOnly = $planOnlyJs;
+  function norm(s) {
+    try { s = (s || '').toString().normalize('NFKC'); } catch(e) { s = (s || '').toString(); }
+    return s.toLowerCase().replace(/[^\p{L}\p{N}\s]+/gu, ' ').replace(/\s+/g, ' ').trim();
+  }
+  function visible(el) {
+    if (!el || !el.isConnected) return false;
+    const r = el.getBoundingClientRect();
+    if (!r || r.width < 1 || r.height < 1) return false;
+    const cs = window.getComputedStyle(el);
+    if (!cs || cs.display === 'none' || cs.visibility === 'hidden' || Number(cs.opacity || 1) === 0) return false;
+    return true;
+  }
+  function inputType(el) {
+    return ((el && el.getAttribute && el.getAttribute('type')) || 'text').toLowerCase();
+  }
+  function typeable(el) {
+    const tag = (el && el.tagName || '').toLowerCase();
+    if (!el) return false;
+    if (el.isContentEditable || tag === 'textarea') return true;
+    if (tag !== 'input') return false;
+    return !/^(button|submit|reset|checkbox|radio|file|image|range|color|hidden)$/i.test(inputType(el));
+  }
+  function setNativeValue(el, value) {
+    const tag = (el.tagName || '').toLowerCase();
+    const proto = tag === 'textarea' ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+    const own = Object.getOwnPropertyDescriptor(el, 'value');
+    const base = Object.getOwnPropertyDescriptor(proto, 'value');
+    if (base && base.set && (!own || own.set !== base.set)) base.set.call(el, value);
+    else el.value = value;
+  }
+  function fireValueEvents(el, data) {
+    try { el.dispatchEvent(new InputEvent('input', { bubbles: true, data: data || null, inputType: 'insertText' })); }
+    catch(e) { el.dispatchEvent(new Event('input', { bubbles: true })); }
+    el.dispatchEvent(new Event('change', { bubbles: true }));
+  }
+  function textParts(el) {
+    const parts = [];
+    const attrs = ['aria-label','title','placeholder','alt','name','id','value'];
+    for (const a of attrs) {
+      const v = el.getAttribute && el.getAttribute(a);
+      if (v) parts.push(v);
+    }
+    if (el.labels) {
+      for (const l of Array.from(el.labels)) {
+        if (l && l.innerText) parts.push(l.innerText);
+      }
+    }
+    if (el.tagName === 'LABEL' && el.control) {
+      parts.push(el.innerText || '');
+      const c = el.control;
+      for (const a of ['aria-label','title','placeholder','name','id']) {
+        const v = c.getAttribute && c.getAttribute(a);
+        if (v) parts.push(v);
+      }
+    } else {
+      parts.push(el.innerText || el.textContent || '');
+    }
+    return parts.map(p => (p || '').toString()).filter(Boolean);
+  }
+  function scoreText(parts, needle) {
+    let best = 0;
+    let bestText = '';
+    for (const raw of parts) {
+      const hay = norm(raw);
+      if (!hay) continue;
+      let score = 0;
+      if (hay === needle) score = 100;
+      else if (hay.startsWith(needle)) score = 88;
+      else if (hay.includes(needle)) {
+        const ratio = Math.min(1, needle.length / Math.max(1, hay.length));
+        score = 62 + Math.floor(ratio * 25);
+      } else if (needle.length >= 2 && hay.includes(needle.slice(0, Math.min(3, needle.length)))) {
+        score = 25;
+      }
+      if (score > best) { best = score; bestText = raw; }
+    }
+    return { score: best, text: bestText };
+  }
+  function roleWeight(el, action) {
+    const tag = (el.tagName || '').toLowerCase();
+    const role = (el.getAttribute && (el.getAttribute('role') || '')) || '';
+    const type = (el.getAttribute && (el.getAttribute('type') || '')) || '';
+    if (action === 'type') {
+      if (typeable(el) || role === 'textbox' || role === 'searchbox' || role === 'combobox') return 40;
+      if (tag === 'label' && el.control) return 25;
+      return -30;
+    }
+    if (tag === 'button' || tag === 'a' || role === 'button' || role === 'link' || role === 'menuitem' || role === 'tab') return 35;
+    if (tag === 'input' && /button|submit|reset|checkbox|radio/.test(type)) return 35;
+    if (el.onclick || tag === 'label' || tag === 'summary') return 20;
+    return 0;
+  }
+  function attrQuote(v) {
+    return (v || '').toString().replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\n/g, ' ');
+  }
+  function cssIdent(v) {
+    try { if (window.CSS && CSS.escape) return CSS.escape(v); } catch(e) {}
+    return (v || '').toString().replace(/[^a-zA-Z0-9_-]/g, function(ch) { return '\\' + ch; });
+  }
+  function selectorCandidates(el, matchedText, action) {
+    const out = [];
+    function push(kind, selector, score, reason) {
+      if (!selector) return;
+      if (out.some(x => x.selector === selector)) return;
+      out.push({ kind, selector, score, reason });
+    }
+    const tag = (el.tagName || '').toLowerCase();
+    const role = el.getAttribute && el.getAttribute('role');
+    const id = el.getAttribute && el.getAttribute('id');
+    if (id) push('css_id', '#' + cssIdent(id), 98, 'stable_id');
+    for (const a of ['data-testid','data-test','data-cy','data-qa']) {
+      const v = el.getAttribute && el.getAttribute(a);
+      if (v) push('css_data_attr', '[' + a + '="' + attrQuote(v) + '"]', 96, a);
+    }
+    const aria = el.getAttribute && el.getAttribute('aria-label');
+    if (aria) push('css_aria_label', '[aria-label="' + attrQuote(aria) + '"]', 90, 'aria_label');
+    const name = el.getAttribute && el.getAttribute('name');
+    if (name && tag) push('css_name', tag + '[name="' + attrQuote(name) + '"]', 84, 'name_attr');
+    const placeholder = el.getAttribute && el.getAttribute('placeholder');
+    if (placeholder) push('css_placeholder', '[placeholder="' + attrQuote(placeholder) + '"]', 82, 'placeholder');
+    if (role) push('css_role', '[role="' + attrQuote(role) + '"]', 62, 'role_attr');
+    if (tag) push('css_tag_fallback', tag, 35, 'last_resort_tag');
+    out.sort((a,b) => b.score - a.score);
+    return out.slice(0, 8);
+  }
+  function locatorCandidates(el, matchedText, action) {
+    const out = [];
+    function push(kind, locator, score, reason) {
+      if (!locator) return;
+      if (out.some(x => x.locator === locator)) return;
+      out.push({ kind, locator, score, reason });
+    }
+    const nameJson = JSON.stringify(matchedText || needleRaw);
+    const tag = (el.tagName || '').toLowerCase();
+    const role = (el.getAttribute && (el.getAttribute('role') || '')) || '';
+    const aria = el.getAttribute && el.getAttribute('aria-label');
+    const placeholder = el.getAttribute && el.getAttribute('placeholder');
+    if (action === 'type') {
+      if (aria) push('playwright_label', 'page.getByLabel(' + JSON.stringify(aria) + ')', 100, 'aria_label');
+      if (placeholder) push('playwright_placeholder', 'page.getByPlaceholder(' + JSON.stringify(placeholder) + ')', 94, 'placeholder');
+      if (role === 'textbox' || role === 'searchbox') push('playwright_role', "page.getByRole('" + role + "', { name: " + nameJson + ' })', 86, 'role_textbox');
+    } else {
+      if (role === 'button' || tag === 'button') push('playwright_role', "page.getByRole('button', { name: " + nameJson + ' })', 100, 'button_name');
+      if (role === 'link' || tag === 'a') push('playwright_role', "page.getByRole('link', { name: " + nameJson + ' })', 92, 'link_name');
+      if (role === 'tab') push('playwright_role', "page.getByRole('tab', { name: " + nameJson + ' })', 90, 'tab_name');
+      push('playwright_text', 'page.getByText(' + nameJson + ')', 70, 'visible_text');
+    }
+    out.sort((a,b) => b.score - a.score);
+    return out.slice(0, 8);
+  }
+  function candidateSummary(c) {
+    return {
+      score: c.score,
+      match_score: c.matchScore,
+      matched_text: c.matchedText,
+      tag_name: c.tag,
+      role: c.role,
+      rect: c.rect,
+      selector_candidates: c.selectorCandidates,
+      locator_candidates: c.locatorCandidates
+    };
+  }
+  const needle = norm(needleRaw);
+  if (!needle) return { ok: false, reason: 'empty_needle' };
+  const selector = action === 'type'
+    ? 'input,textarea,[contenteditable=true],[role=textbox],[role=searchbox],[role=combobox],label'
+    : 'button,a,input,textarea,select,[role],[onclick],label,summary,[contenteditable=true]';
+  // v1.4.0 DOM bridge v2: deep traversal — Shadow DOM + same-origin iframe
+  // 기존 querySelectorAll 은 light-DOM 1뎁스만 보지만, Slack/Discord/Notion 같은
+  // chromium 앱은 web component (shadowRoot) 와 same-origin iframe 안에 입력란이
+  // 들어있는 경우가 많음. 보안상 cross-origin iframe 은 자동 스킵.
+  function deepCollect(root, sel, out, hops) {
+    if (!root || hops <= 0) return;
+    try {
+      const found = root.querySelectorAll ? root.querySelectorAll(sel) : [];
+      for (let i = 0; i < found.length && out.length < 1200; i++) out.push(found[i]);
+    } catch (e) { /* ignore selector errors */ }
+    // shadow roots
+    try {
+      const all = root.querySelectorAll ? root.querySelectorAll('*') : [];
+      for (let i = 0; i < all.length && out.length < 1200; i++) {
+        const sr = all[i].shadowRoot;
+        if (sr) deepCollect(sr, sel, out, hops - 1);
+      }
+    } catch (e) { /* ignore */ }
+    // same-origin iframes
+    try {
+      const frames = root.querySelectorAll ? root.querySelectorAll('iframe,frame') : [];
+      for (let i = 0; i < frames.length && out.length < 1200; i++) {
+        let doc = null;
+        try { doc = frames[i].contentDocument; } catch (e) { doc = null; }
+        if (doc) deepCollect(doc, sel, out, hops - 1);
+      }
+    } catch (e) { /* ignore */ }
+  }
+  const nodes = [];
+  deepCollect(document, selector, nodes, 4);
+  // 동일 element 중복 제거 (shadow host + light child 같은 경우)
+  const seen = new Set();
+  const uniqueNodes = [];
+  for (const n of nodes) {
+    if (seen.has(n)) continue;
+    seen.add(n);
+    uniqueNodes.push(n);
+    if (uniqueNodes.length >= 800) break;
+  }
+  const candidates = [];
+  for (const el0 of uniqueNodes) {
+    let el = el0;
+    if (action === 'type' && el0.tagName === 'LABEL' && el0.control) el = el0.control;
+    if (!visible(el0) && !visible(el)) continue;
+    const parts = textParts(el0);
+    if (el !== el0) parts.push(...textParts(el));
+    const st = scoreText(parts, needle);
+    if (st.score <= 0) continue;
+    const r = (visible(el) ? el : el0).getBoundingClientRect();
+    const area = Math.max(1, r.width * r.height);
+    let score = st.score + roleWeight(el, action);
+    if (area < 40000) score += 12;
+    if (area > 180000) score -= 30;
+    if (el.disabled || el.getAttribute('aria-disabled') === 'true') score -= 80;
+    candidates.push({
+      el,
+      el0,
+      score,
+      matchScore: st.score,
+      matchedText: st.text,
+      tag: el.tagName,
+      role: el.getAttribute('role') || '',
+      rect: {x:r.x,y:r.y,width:r.width,height:r.height},
+      selectorCandidates: selectorCandidates(el, st.text, action),
+      locatorCandidates: locatorCandidates(el, st.text, action)
+    });
+  }
+  candidates.sort((a,b) => b.score - a.score || a.rect.width*a.rect.height - b.rect.width*b.rect.height);
+  const best = candidates[0];
+  if (!best || best.score < 55) {
+    return {
+      ok: false,
+      reason: 'no_text_match',
+      candidate_count: candidates.length,
+      top_score: best ? best.score : 0,
+      candidate_summaries: candidates.slice(0, 5).map(candidateSummary)
+    };
+  }
+  const el = best.el;
+  if (!planOnly) {
+    try { el.scrollIntoView({block:'center', inline:'center', behavior:'instant'}); } catch(e) {}
+    try { el.focus(); } catch(e) {}
+    if (action === 'click') {
+      if (best.el0 && best.el0.tagName === 'LABEL' && best.el0.control) best.el0.click();
+      else el.click();
+    } else {
+      const isCE = !!el.isContentEditable;
+      const isInput = typeable(el);
+      if (!isCE && !isInput) return { ok: false, reason: 'matched_element_not_typeable', tag_name: el.tagName, matched_text: best.matchedText, score: best.score };
+      let changed = false;
+      if (clearFirst) {
+        if (isCE) el.textContent = '';
+        else setNativeValue(el, '');
+        changed = true;
+      }
+      if (textToType) {
+        if (isCE) el.textContent += textToType;
+        else setNativeValue(el, (el.value || '') + textToType);
+        changed = true;
+      }
+      if (changed) {
+        fireValueEvents(el, textToType);
+      }
+      if (pressEnter) {
+        for (const t of ['keydown','keypress','keyup']) {
+          el.dispatchEvent(new KeyboardEvent(t, { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true }));
+        }
+      }
+    }
+  }
+  return {
+    ok: true,
+    action,
+    query: needleRaw,
+    matched_text: best.matchedText,
+    score: best.score,
+    match_score: best.matchScore,
+    tag_name: el.tagName,
+    role: el.getAttribute('role') || '',
+    rect: best.rect,
+    selector_candidates: best.selectorCandidates,
+    locator_candidates: best.locatorCandidates,
+    candidate_summaries: candidates.slice(0, 5).map(candidateSummary),
+    candidate_count: candidates.length,
+    text_length: textToType.length,
+    sent_enter: !planOnly && !!pressEnter,
+    plan_only: !!planOnly
+  };
+})()
+"@
+
+  $r = _Cdp-WsCall -WsUrl $page.ws_url -Method "Runtime.evaluate" -Params @{
+    expression = $expr
+    returnByValue = $true
+    awaitPromise = $false
+  } -TimeoutMs 8000 -MessageId 1
+
+  if (-not $r.ok -or -not $r.response) {
+    _Emit @{status="error"; reason="cdp_call_failed"; detail=$r.error; page_id=$page.id} 1
+  }
+  $resp = $r.response
+  $rExc = $resp.result.exceptionDetails
+  if ($rExc) {
+    _Emit @{
+      status = "error"
+      reason = "javascript_exception"
+      exception_text = "$($rExc.text)"
+      exception_description = "$($rExc.exception.description)"
+      page_id = $page.id
+    } 1
+  }
+  $rv = $resp.result.result.value
+  if (-not $rv -or -not $rv.ok) {
+    _Emit ([ordered]@{
+      status = "partial"
+      reason = if ($rv) { "$($rv.reason)" } else { "no_result" }
+      query = $Needle
+      candidate_count = if ($rv) { [int]$rv.candidate_count } else { 0 }
+      top_score = if ($rv) { [int]$rv.top_score } else { 0 }
+      candidate_summaries = if ($rv) { @($rv.candidate_summaries) } else { @() }
+      page_id = $page.id
+      page_title = "$($page.title)"
+      page_url = "$($page.url)"
+      page_selection = $Script:_LastCdpPageSelection
+      dom_bridge_plan = $bridgePlan
+    }) 2
+  }
+  _Emit ([ordered]@{
+    status = "ok"
+    dom_action = $DomAction
+    plan_only = [bool]$rv.plan_only
+    query = $Needle
+    matched_text = "$($rv.matched_text)"
+    score = [int]$rv.score
+    match_score = [int]$rv.match_score
+    tag_name = "$($rv.tag_name)"
+    role = "$($rv.role)"
+    rect = $rv.rect
+    candidate_count = [int]$rv.candidate_count
+    text_length = [int]$rv.text_length
+    sent_enter = [bool]$rv.sent_enter
+    page_id = $page.id
+    page_title = "$($page.title)"
+    page_url = "$($page.url)"
+    page_selection = $Script:_LastCdpPageSelection
+    selector_candidates = @($rv.selector_candidates)
+    locator_candidates = @($rv.locator_candidates)
+    candidate_summaries = @($rv.candidate_summaries)
+    dom_bridge_plan = $bridgePlan
+  })
 }
 
 # ============================================================================
@@ -1491,6 +2642,25 @@ function _Action-CdpClick {
   })
 }
 
+function _Action-CdpSmartClick {
+  _Cdp-RunSmartDomAction -DomAction "click" -Needle $CdpText -TextToType "" -Clear $false -Enter $false
+}
+
+function _Action-CdpSmartFind {
+  _Cdp-RunSmartDomAction -DomAction "click" -Needle $CdpText -TextToType "" -Clear $false -Enter $false -PlanOnly $true
+}
+
+function _Action-CdpSmartTypeFind {
+  _Cdp-RunSmartDomAction -DomAction "type" -Needle $CdpText -TextToType "" -Clear $false -Enter $false -PlanOnly $true
+}
+
+function _Action-CdpSmartType {
+  if (-not $Text -and -not $ClearFirst -and -not $PressEnter) {
+    _Emit @{status="error"; reason="missing_text_or_action"} 1
+  }
+  _Cdp-RunSmartDomAction -DomAction "type" -Needle $CdpText -TextToType $Text -Clear ([bool]$ClearFirst) -Enter ([bool]$PressEnter)
+}
+
 # ============================================================================
 # Action: click  ─ 좌표 기반 마우스 클릭 (SendInput) + v1.2.0 hit-test 가드
 # ============================================================================
@@ -1529,15 +2699,44 @@ function _Action-Click {
       } 3
     }
   }
+  $originalX = $X
+  $originalY = $Y
+  $refined = $null
+  if ($ClickRefine -eq "uia-safe") {
+    $refined = _Resolve-UiaPointRefinement -X $X -Y $Y -Inset $ClickInset
+    if ($refined) {
+      $X = [int]$refined.X
+      $Y = [int]$refined.Y
+      if ($TargetHwnd -gt 0 -or $TargetMatch) {
+        $refinedHit = _Test-CoordsInTarget -X $X -Y $Y -ExpectedHwnd $TargetHwnd -ExpectedMatch $TargetMatch
+        if (-not $refinedHit.matched) {
+          $X = $originalX
+          $Y = $originalY
+          $refined = $null
+        }
+      }
+    }
+  }
   $isDouble = ($Button -eq "double")
   $btn = if ($isDouble) { "left" } else { $Button }
   [CucpNative]::SendMouseClick($X, $Y, $btn, $isDouble)
-  _Emit ([ordered]@{
+  $payload = [ordered]@{
     status = "ok"
     x = $X; y = $Y; button = $Button; double = $isDouble
     target_hwnd = $TargetHwnd
     target_match = $TargetMatch
-  })
+    click_refine = $ClickRefine
+  }
+  if ($refined) {
+    $payload["original"] = [ordered]@{ x=$originalX; y=$originalY }
+    $payload["refined_by"] = "uia-safe"
+    $payload["refined_point_source"] = $refined.PointSource
+    $payload["native_clickable_point"] = [bool]$refined.NativeClickable
+    $payload["refine_score"] = [int]$refined.Score
+    $payload["refine_depth"] = [int]$refined.Depth
+    $payload["uia_match"] = $refined.Match
+  }
+  _Emit $payload
 }
 
 # ============================================================================
@@ -1802,14 +3001,31 @@ function _Action-UiaFind {
         }
       }
       if ($score -le 0) { continue }
+      $pattern = $null
+      try { $pattern = _Get-UiaSupportedPatternName -Element $el } catch { $pattern = $null }
+      $valuePattern = $false
+      $valueReadonly = $null
+      try {
+        $vp = $el.GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern)
+        if ($vp) {
+          $valuePattern = $true
+          $valueReadonly = [bool]$vp.Current.IsReadOnly
+        }
+      } catch { }
+      $point = $null
+      try { $point = _Get-UiaPreferredClickPoint -Element $el -Rect $r -Inset $ClickInset } catch { $point = $null }
       [void]$candidates.Add([ordered]@{
         text = if ($name) { $name } elseif ($autoId) { $autoId } else { $help }
         role = $localizedRole
         rect = [ordered]@{ x=[int]$r.X; y=[int]$r.Y; width=[int]$r.Width; height=[int]$r.Height }
         center = [ordered]@{ x=[int]($r.X + $r.Width / 2); y=[int]($r.Y + $r.Height / 2) }
+        click_point = if ($point) { [ordered]@{ x=[int]$point.X; y=[int]$point.Y; source=$point.Source; native_clickable=[bool]$point.NativeClickable } } else { $null }
         score = $score
         match_reason = $reason
         automation_id = $autoId
+        invoke_pattern = $pattern
+        value_pattern = $valuePattern
+        value_readonly = $valueReadonly
       })
       $count++
     } catch { continue }
@@ -2243,28 +3459,40 @@ function _Action-OcrFindText {
     if (-not (_Ensure-OCR)) {
       _Emit @{status="error"; reason="ocr_unavailable"; ocr_error=$Script:_OCRError} 1
     }
-    Add-Type -AssemblyName System.Drawing -ErrorAction Stop
-    $vx = [CucpNative]::GetSystemMetrics([CucpNative]::SM_XVIRTUALSCREEN)
-    $vy = [CucpNative]::GetSystemMetrics([CucpNative]::SM_YVIRTUALSCREEN)
-    $vw = [CucpNative]::GetSystemMetrics([CucpNative]::SM_CXVIRTUALSCREEN)
-    $vh = [CucpNative]::GetSystemMetrics([CucpNative]::SM_CYVIRTUALSCREEN)
-    $sx = if ($ScreenshotX -ge 0) { $ScreenshotX } else { $vx }
-    $sy = if ($ScreenshotY -ge 0) { $ScreenshotY } else { $vy }
-    $sw = if ($ScreenshotW -gt 0) { $ScreenshotW } else { $vw }
-    $sh = if ($ScreenshotH -gt 0) { $ScreenshotH } else { $vh }
-    $maxDim = [Windows.Media.Ocr.OcrEngine]::MaxImageDimension
-    if ($sw -gt $maxDim -or $sh -gt $maxDim) {
-      _Emit @{status="error"; reason="region_exceeds_max_image_dimension"; max_dim=$maxDim} 1
+    $capX = $ScreenshotX; $capY = $ScreenshotY; $capW = $ScreenshotW; $capH = $ScreenshotH
+    if ($Match -and $ScreenshotX -lt 0 -and $ScreenshotY -lt 0 -and $ScreenshotW -le 0 -and $ScreenshotH -le 0) {
+      $needle = $Match.ToLowerInvariant()
+      $targetWin = [CucpNative]::EnumerateTopLevel() |
+        Where-Object { $_.Title -and $_.Title.ToLowerInvariant().Contains($needle) } |
+        Select-Object -First 1
+      if ($targetWin) {
+        $capX = [int]$targetWin.X
+        $capY = [int]$targetWin.Y
+        $capW = [int]$targetWin.Width
+        $capH = [int]$targetWin.Height
+      }
     }
-    $tmp = [System.IO.Path]::Combine([System.IO.Path]::GetTempPath(), "cucp-ocr-find-$([System.Guid]::NewGuid().ToString('N')).png")
+    $cap = _Capture-ScreenRegionToTempPng -RegionX $capX -RegionY $capY `
+                                          -RegionW $capW -RegionH $capH `
+                                          -Prefix "cucp-ocr-find"
+    if ($cap.Error) {
+      $exitCode = 1
+      $statusText = "error"
+      if ($cap.Error -eq "screenshot_unavailable") {
+        $exitCode = 2
+        $statusText = "partial"
+      }
+      _Emit @{
+        status=$statusText
+        reason=$cap.Error
+        detail=$cap.Detail
+        max_dim=$cap.MaxDim
+        recommended_action="Retry from an interactive unlocked desktop session, provide -OcrPath, or use a smaller visible region."
+      } $exitCode
+    }
+    $sx = $cap.X; $sy = $cap.Y; $sw = $cap.W; $sh = $cap.H
+    $tmp = $cap.Path
     try {
-      $bmp = New-Object System.Drawing.Bitmap $sw, $sh
-      $gg = [System.Drawing.Graphics]::FromImage($bmp)
-      try {
-        $gg.CopyFromScreen($sx, $sy, 0, 0, (New-Object System.Drawing.Size $sw, $sh))
-      } finally { $gg.Dispose() }
-      $bmp.Save($tmp, [System.Drawing.Imaging.ImageFormat]::Png)
-      $bmp.Dispose()
       $sb = _Load-SoftwareBitmapFromFile -Path $tmp
       $ocrResult = _Wait-AsyncOp ($Script:_OCREngine.RecognizeAsync($sb)) ([Windows.Media.Ocr.OcrResult])
       $body = _Convert-OcrResult -OcrResult $ocrResult -OffsetX $sx -OffsetY $sy
@@ -2279,35 +3507,7 @@ function _Action-OcrFindText {
     }
   }
 
-  # 매칭 — line 단위 + word 단위 모두 시도
-  $candidates = @()
-  foreach ($line in $body.lines) {
-    $lineScore = _Score-OcrText -Needle $OcrText -Hay $line.text -Mode $OcrMatch
-    if ($lineScore -gt 0) {
-      $candidates += [ordered]@{
-        scope = "line"
-        score = $lineScore
-        text = $line.text
-        x = $line.x; y = $line.y; w = $line.w; h = $line.h
-        cx = $line.cx; cy = $line.cy
-      }
-    }
-    foreach ($w in $line.words) {
-      $wScore = _Score-OcrText -Needle $OcrText -Hay $w.text -Mode $OcrMatch
-      if ($wScore -gt 0) {
-        $candidates += [ordered]@{
-          scope = "word"
-          score = $wScore
-          text = $w.text
-          x = $w.x; y = $w.y; w = $w.w; h = $w.h
-          cx = $w.cx; cy = $w.cy
-        }
-      }
-    }
-  }
-
-  # 정렬 + top-N
-  $sorted = $candidates | Sort-Object -Property score -Descending | Select-Object -First $OcrMaxCandidates
+  $sorted = @(_Match-OcrCandidates -Body $body -Needle $OcrText -Mode $OcrMatch | Select-Object -First $OcrMaxCandidates)
 
   if (-not $sorted -or @($sorted).Count -eq 0) {
     $payload = [ordered]@{
@@ -2370,22 +3570,58 @@ function _Action-OcrUiaFuse {
     _Emit @{status="error"; reason="ocr_unavailable"; ocr_error=$Script:_OCRError} 1
   }
 
+  $list = [CucpNative]::EnumerateTopLevel()
+  $targetHwnd = [IntPtr]::Zero
+  $targetWin = $null
+  if ($Match) {
+    $needle = $Match.ToLowerInvariant()
+    $targetWin = $list | Where-Object { $_.Title -and $_.Title.ToLowerInvariant().Contains($needle) } | Select-Object -First 1
+  }
+  if (-not $targetWin) {
+    $targetWin = $list | Where-Object { $_.Foreground } | Select-Object -First 1
+  }
+  if ($targetWin) { $targetHwnd = $targetWin.Hwnd }
+  if ($targetHwnd -eq [IntPtr]::Zero) {
+    _Emit @{status="partial"; reason="no_target_window"} 2
+  }
+
+  $capX = $ScreenshotX; $capY = $ScreenshotY; $capW = $ScreenshotW; $capH = $ScreenshotH
+  if ($targetWin -and $ScreenshotX -lt 0 -and $ScreenshotY -lt 0 -and $ScreenshotW -le 0 -and $ScreenshotH -le 0) {
+    $capX = [int]$targetWin.X
+    $capY = [int]$targetWin.Y
+    $capW = [int]$targetWin.Width
+    $capH = [int]$targetWin.Height
+  }
+
   # 1) 화면 캡처 + OCR (v1.0.0 헬퍼로 추출)
-  $cap = _Capture-ScreenRegionToTempPng -RegionX $ScreenshotX -RegionY $ScreenshotY `
-                                          -RegionW $ScreenshotW -RegionH $ScreenshotH `
+  $cap = _Capture-ScreenRegionToTempPng -RegionX $capX -RegionY $capY `
+                                          -RegionW $capW -RegionH $capH `
                                           -Prefix "cucp-fuse"
   if ($cap.Error) {
-    _Emit @{status="error"; reason=$cap.Error; max_dim=$cap.MaxDim} 1
+    $exitCode = 1
+    $statusText = "error"
+    if ($cap.Error -eq "screenshot_unavailable") {
+      $exitCode = 2
+      $statusText = "partial"
+    }
+    _Emit @{
+      status=$statusText
+      reason=$cap.Error
+      detail=$cap.Detail
+      max_dim=$cap.MaxDim
+      recommended_action="Retry from an interactive unlocked desktop session, provide a matching foreground window, or use a smaller visible region."
+    } $exitCode
   }
   $sx = $cap.X; $sy = $cap.Y; $sw = $cap.W; $sh = $cap.H
   $tmp = $cap.Path
   $ocrTop = $null
+  $ocrCandidates = @()
   try {
     $sb = _Load-SoftwareBitmapFromFile -Path $tmp
     $ocrResult = _Wait-AsyncOp ($Script:_OCREngine.RecognizeAsync($sb)) ([Windows.Media.Ocr.OcrResult])
     $body = _Convert-OcrResult -OcrResult $ocrResult -OffsetX $sx -OffsetY $sy
-    $sortedArr = _Match-OcrCandidates -Body $body -Needle $OcrText -Mode $OcrMatch
-    if ($sortedArr.Count -gt 0) { $ocrTop = $sortedArr[0] }
+    $ocrCandidates = @(_Match-OcrCandidates -Body $body -Needle $OcrText -Mode $OcrMatch | Select-Object -First $OcrMaxCandidates)
+    if ($ocrCandidates.Count -gt 0) { $ocrTop = $ocrCandidates[0] }
   } finally {
     if (Test-Path -LiteralPath $tmp) { Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue }
   }
@@ -2400,22 +3636,10 @@ function _Action-OcrUiaFuse {
     } 2
   }
 
-  # 2) UIA tree 에서 element BoundingRectangle 이 OCR top 중심점을 포함하는 element 찾기
-  $list = [CucpNative]::EnumerateTopLevel()
-  $targetHwnd = [IntPtr]::Zero
-  if ($Match) {
-    $needle = $Match.ToLowerInvariant()
-    $hit = $list | Where-Object { $_.Title -and $_.Title.ToLowerInvariant().Contains($needle) } | Select-Object -First 1
-    if ($hit) { $targetHwnd = $hit.Hwnd }
-  }
-  if ($targetHwnd -eq [IntPtr]::Zero) {
-    $fg = $list | Where-Object { $_.Foreground } | Select-Object -First 1
-    if ($fg) { $targetHwnd = $fg.Hwnd }
-  }
-
   $uiaMatch = $null
   $canInvoke = $false
   $invokePattern = $null
+  $fusion = $null
   if ($targetHwnd -ne [IntPtr]::Zero) {
     try {
       $rootEl = [System.Windows.Automation.AutomationElement]::FromHandle($targetHwnd)
@@ -2424,72 +3648,12 @@ function _Action-OcrUiaFuse {
           [System.Windows.Automation.TreeScope]::Descendants,
           [System.Windows.Automation.Condition]::TrueCondition
         )
-        # OCR top 중심점을 포함하는 element 중 가장 작은 것 (가장 구체적인 element 우선)
-        $cx = [int]$ocrTop.cx; $cy = [int]$ocrTop.cy
-        $bestArea = [int]::MaxValue
-        $bestEl = $null
-        $bestCur = $null
-        foreach ($el in $allEls) {
-          try {
-            $cur = $el.Current
-            $r = $cur.BoundingRectangle
-            if ($r.IsEmpty) { continue }
-            if ($cx -lt $r.X -or $cx -gt ($r.X + $r.Width)) { continue }
-            if ($cy -lt $r.Y -or $cy -gt ($r.Y + $r.Height)) { continue }
-            $area = [int]($r.Width * $r.Height)
-            if ($area -lt $bestArea) {
-              $bestArea = $area
-              $bestEl = $el
-              $bestCur = $cur
-            }
-          } catch { continue }
-        }
-        if ($bestEl -and $bestCur) {
-          $r = $bestCur.BoundingRectangle
-          $name = ""; try { $name = "$($bestCur.Name)" } catch { }
-          $autoId = ""; try { $autoId = "$($bestCur.AutomationId)" } catch { }
-          $localizedRole = ""; try { $localizedRole = $bestCur.LocalizedControlType } catch { }
-          $clazz = ""; try { $clazz = "$($bestCur.ClassName)" } catch { }
-
-          # InvokePattern / TogglePattern / SelectionItemPattern 지원 여부 확인
-          $patternId = $null
-          $patternName = $null
-          try {
-            $invP = $bestEl.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern)
-            if ($invP) { $patternName = "InvokePattern"; $canInvoke = $true }
-          } catch { }
-          if (-not $canInvoke) {
-            try {
-              $togP = $bestEl.GetCurrentPattern([System.Windows.Automation.TogglePattern]::Pattern)
-              if ($togP) { $patternName = "TogglePattern"; $canInvoke = $true }
-            } catch { }
-          }
-          if (-not $canInvoke) {
-            try {
-              $selP = $bestEl.GetCurrentPattern([System.Windows.Automation.SelectionItemPattern]::Pattern)
-              if ($selP) { $patternName = "SelectionItemPattern"; $canInvoke = $true }
-            } catch { }
-          }
-          $invokePattern = $patternName
-
-          # v1.0.0: 매칭 식별자 우선순위 결정
-          # Name 비어있어도 AutomationId / ClassName 으로 invoke 가능 → 그 가이드를 출력
-          $preferredId = "none"
-          if ($name -and $name.Trim().Length -gt 0) { $preferredId = "name" }
-          elseif ($autoId -and $autoId.Trim().Length -gt 0) { $preferredId = "automation_id" }
-          elseif ($clazz -and $clazz.Trim().Length -gt 0) { $preferredId = "class_name" }
-
-          $uiaMatch = [ordered]@{
-            name = $name
-            automation_id = $autoId
-            class_name = $clazz
-            role = $localizedRole
-            rect = [ordered]@{ x=[int]$r.X; y=[int]$r.Y; width=[int]$r.Width; height=[int]$r.Height }
-            center = [ordered]@{ x=[int]($r.X + $r.Width / 2); y=[int]($r.Y + $r.Height / 2) }
-            area = [int]($r.Width * $r.Height)
-            # fusion 호출자가 어느 키로 invoke 시도해야 하는지 가이드
-            preferred_identifier = $preferredId
-          }
+        $fusion = _Resolve-OcrUiaFusionCandidate -RootEl $rootEl -Elements $allEls -OcrCandidates $ocrCandidates -Limit $OcrMaxCandidates
+        if ($fusion) {
+          $ocrTop = $fusion.Ocr
+          $uiaMatch = $fusion.UiaMatch
+          $canInvoke = [bool]$fusion.CanInvoke
+          $invokePattern = $fusion.PatternName
         }
       }
     } catch { }
@@ -2497,8 +3661,8 @@ function _Action-OcrUiaFuse {
 
   # 3) 추천 결정
   $recommendation = "ocr_click"  # default — UIA element 못 찾음
-  if ($canInvoke) { $recommendation = "uia_invoke" }
-  elseif ([int]$ocrTop.score -lt 70) { $recommendation = "low_confidence_skip" }
+  if ([int]$ocrTop.score -lt 70) { $recommendation = "low_confidence_skip" }
+  elseif ($canInvoke) { $recommendation = "uia_invoke" }
 
   _Emit ([ordered]@{
     status = "ok"
@@ -2510,6 +3674,8 @@ function _Action-OcrUiaFuse {
     can_invoke = $canInvoke
     invoke_pattern = $invokePattern
     recommendation = $recommendation
+    candidate_count = @($ocrCandidates).Count
+    candidates = @($ocrCandidates)
     region = [ordered]@{ x=$sx; y=$sy; width=$sw; height=$sh }
   })
 }
@@ -2541,22 +3707,58 @@ function _Action-OcrUiaInvoke {
     _Emit @{status="error"; reason="ocr_unavailable"; ocr_error=$Script:_OCRError} 1
   }
 
+  $list = [CucpNative]::EnumerateTopLevel()
+  $targetHwnd = [IntPtr]::Zero
+  $targetWin = $null
+  if ($Match) {
+    $needle = $Match.ToLowerInvariant()
+    $targetWin = $list | Where-Object { $_.Title -and $_.Title.ToLowerInvariant().Contains($needle) } | Select-Object -First 1
+  }
+  if (-not $targetWin) {
+    $targetWin = $list | Where-Object { $_.Foreground } | Select-Object -First 1
+  }
+  if ($targetWin) { $targetHwnd = $targetWin.Hwnd }
+  if ($targetHwnd -eq [IntPtr]::Zero) {
+    _Emit @{status="partial"; reason="no_target_window"} 2
+  }
+
+  $capX = $ScreenshotX; $capY = $ScreenshotY; $capW = $ScreenshotW; $capH = $ScreenshotH
+  if ($targetWin -and $ScreenshotX -lt 0 -and $ScreenshotY -lt 0 -and $ScreenshotW -le 0 -and $ScreenshotH -le 0) {
+    $capX = [int]$targetWin.X
+    $capY = [int]$targetWin.Y
+    $capW = [int]$targetWin.Width
+    $capH = [int]$targetWin.Height
+  }
+
   # 1) 화면 캡처 + OCR (v1.0.0 헬퍼로 추출)
-  $cap = _Capture-ScreenRegionToTempPng -RegionX $ScreenshotX -RegionY $ScreenshotY `
-                                          -RegionW $ScreenshotW -RegionH $ScreenshotH `
+  $cap = _Capture-ScreenRegionToTempPng -RegionX $capX -RegionY $capY `
+                                          -RegionW $capW -RegionH $capH `
                                           -Prefix "cucp-ouinv"
   if ($cap.Error) {
-    _Emit @{status="error"; reason=$cap.Error; max_dim=$cap.MaxDim} 1
+    $exitCode = 1
+    $statusText = "error"
+    if ($cap.Error -eq "screenshot_unavailable") {
+      $exitCode = 2
+      $statusText = "partial"
+    }
+    _Emit @{
+      status=$statusText
+      reason=$cap.Error
+      detail=$cap.Detail
+      max_dim=$cap.MaxDim
+      recommended_action="Retry from an interactive unlocked desktop session, provide a matching foreground window, or use a smaller visible region."
+    } $exitCode
   }
   $sx = $cap.X; $sy = $cap.Y; $sw = $cap.W; $sh = $cap.H
   $tmp = $cap.Path
   $ocrTop = $null
+  $ocrCandidates = @()
   try {
     $sb = _Load-SoftwareBitmapFromFile -Path $tmp
     $ocrResult = _Wait-AsyncOp ($Script:_OCREngine.RecognizeAsync($sb)) ([Windows.Media.Ocr.OcrResult])
     $body = _Convert-OcrResult -OcrResult $ocrResult -OffsetX $sx -OffsetY $sy
-    $sortedArr = _Match-OcrCandidates -Body $body -Needle $OcrText -Mode $OcrMatch
-    if ($sortedArr.Count -gt 0) { $ocrTop = $sortedArr[0] }
+    $ocrCandidates = @(_Match-OcrCandidates -Body $body -Needle $OcrText -Mode $OcrMatch | Select-Object -First $OcrMaxCandidates)
+    if ($ocrCandidates.Count -gt 0) { $ocrTop = $ocrCandidates[0] }
   } finally {
     if (Test-Path -LiteralPath $tmp) { Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue }
   }
@@ -2572,22 +3774,6 @@ function _Action-OcrUiaInvoke {
     } 2
   }
 
-  # 2) UIA tree 에서 OCR 좌표 포함 element 찾기 (가장 작은 = 가장 구체적)
-  $list = [CucpNative]::EnumerateTopLevel()
-  $targetHwnd = [IntPtr]::Zero
-  if ($Match) {
-    $needle = $Match.ToLowerInvariant()
-    $hit = $list | Where-Object { $_.Title -and $_.Title.ToLowerInvariant().Contains($needle) } | Select-Object -First 1
-    if ($hit) { $targetHwnd = $hit.Hwnd }
-  }
-  if ($targetHwnd -eq [IntPtr]::Zero) {
-    $fg = $list | Where-Object { $_.Foreground } | Select-Object -First 1
-    if ($fg) { $targetHwnd = $fg.Hwnd }
-  }
-  if ($targetHwnd -eq [IntPtr]::Zero) {
-    _Emit @{status="partial"; reason="no_target_window"} 2
-  }
-
   $rootEl = [System.Windows.Automation.AutomationElement]::FromHandle($targetHwnd)
   if (-not $rootEl) { _Emit @{status="partial"; reason="uia_root_null"} 2 }
 
@@ -2595,25 +3781,23 @@ function _Action-OcrUiaInvoke {
     [System.Windows.Automation.TreeScope]::Descendants,
     [System.Windows.Automation.Condition]::TrueCondition
   )
-  $cx = [int]$ocrTop.cx; $cy = [int]$ocrTop.cy
-  $bestArea = [int]::MaxValue
-  $bestEl = $null
-  $bestCur = $null
-  foreach ($el in $allEls) {
-    try {
-      $cur = $el.Current
-      $r = $cur.BoundingRectangle
-      if ($r.IsEmpty) { continue }
-      if ($cx -lt $r.X -or $cx -gt ($r.X + $r.Width)) { continue }
-      if ($cy -lt $r.Y -or $cy -gt ($r.Y + $r.Height)) { continue }
-      $area = [int]($r.Width * $r.Height)
-      if ($area -lt $bestArea) {
-        $bestArea = $area; $bestEl = $el; $bestCur = $cur
-      }
-    } catch { continue }
-  }
-  if (-not $bestEl) {
+  $fusion = _Resolve-OcrUiaFusionCandidate -RootEl $rootEl -Elements $allEls -OcrCandidates $ocrCandidates -Limit $OcrMaxCandidates
+  if (-not $fusion) {
     _Emit @{status="partial"; reason="no_uia_element_at_ocr_coord"; ocr_top=$ocrTop} 2
+  }
+  $ocrTop = $fusion.Ocr
+  $bestEl = $fusion.Element
+  $bestCur = $fusion.Current
+  $cx = [int]$ocrTop.cx
+  $cy = [int]$ocrTop.cy
+  if ([int]$ocrTop.score -lt 70) {
+    _Emit @{
+      status = "partial"
+      reason = "low_confidence_match"
+      score = [int]$ocrTop.score
+      matched_ocr_text = $ocrTop.text
+      threshold = 70
+    } 2
   }
 
   # 3) Pattern 찾고 곧바로 invoke
@@ -2840,6 +4024,325 @@ function _Action-ScreenshotDiff {
 }
 
 # ============================================================================
+# v1.4.0 Action: cdp-deep-find  ─ Shadow DOM + same-origin iframe traversal report
+# ============================================================================
+# 동기: smart-find/smart-type 가 deepCollect 로 shadow/iframe 안까지 보지만,
+# 그 traversal 메타정보 (몇 개 shadow root, iframe 통과했는지) 가 외부에 안 보임.
+# 이 액션은 read-only 로 그 정보를 노출해서 디버깅/검증/벤치마크에 사용.
+#
+# 입력: -CdpText "<label>" [-CdpPort 9222] [-CdpPageMatch <s>]
+# 출력: {
+#   status, page_id, page_url, page_title,
+#   traversal: { hops, shadow_roots_seen, iframes_seen, iframes_blocked, total_nodes },
+#   found_count, top_matches: [...]
+# }
+# ============================================================================
+function _Action-CdpDeepFind {
+  if (-not $CdpText) {
+    _Emit @{status="error"; reason="missing_text"; recommended_action="provide -CdpText"} 1
+  }
+  $detect = _Cdp-Detect -Port $CdpPort
+  if (-not $detect.available) {
+    _Emit @{status="partial"; reason="cdp_port_closed"; port=$CdpPort; detail=$detect.error} 2
+  }
+  $page = _Cdp-FindPage -Detect $detect -PageMatch $CdpPageMatch
+  if (-not $page) {
+    _Emit @{status="partial"; reason="no_matching_page"; page_match=$CdpPageMatch} 2
+  }
+  # JSON-safe single-quote escape
+  $needleEscaped = ($CdpText -replace '\\', '\\\\') -replace "'", "\\'"
+  $js = @"
+(function(){
+  var report = { hops:4, shadow_roots_seen:0, iframes_seen:0, iframes_blocked:0, total_nodes:0 };
+  var matches = [];
+  function norm(s){ return (s||'').toString().toLowerCase().replace(/\s+/g,' ').trim(); }
+  function scoreText(parts, needle){
+    var best=0, bestText=null;
+    for (var i=0;i<parts.length;i++){
+      var t = norm(parts[i]);
+      if (!t) continue;
+      if (t === needle) { if (best<100){best=100;bestText=parts[i];} }
+      else if (t.indexOf(needle) >= 0) { if (best<70){best=70;bestText=parts[i];} }
+    }
+    return { score:best, text:bestText };
+  }
+  function textParts(el){
+    var p=[];
+    try{
+      if (el.innerText) p.push(el.innerText);
+      if (el.textContent) p.push(el.textContent);
+      if (el.value) p.push(el.value);
+      if (el.placeholder) p.push(el.placeholder);
+      if (el.title) p.push(el.title);
+      var aria = el.getAttribute && el.getAttribute('aria-label');
+      if (aria) p.push(aria);
+      var n = el.getAttribute && el.getAttribute('name');
+      if (n) p.push(n);
+      var id = el.id; if (id) p.push(id);
+    } catch(e){}
+    return p;
+  }
+  function deep(root, hops){
+    if (!root || hops <= 0) return;
+    var all=[];
+    try { all = root.querySelectorAll ? root.querySelectorAll('*') : []; } catch(e){}
+    report.total_nodes += all.length;
+    for (var i=0;i<all.length && matches.length<25;i++){
+      var el = all[i];
+      var parts = textParts(el);
+      var st = scoreText(parts, NEEDLE);
+      if (st.score > 0){
+        var r=null;
+        try{ r = el.getBoundingClientRect(); } catch(e){}
+        matches.push({
+          tag: el.tagName ? el.tagName.toLowerCase() : null,
+          score: st.score,
+          matched_text: st.text ? st.text.substring(0,80) : null,
+          rect: r ? {x:Math.round(r.left),y:Math.round(r.top),w:Math.round(r.width),h:Math.round(r.height)} : null
+        });
+      }
+      if (el.shadowRoot) {
+        report.shadow_roots_seen++;
+        deep(el.shadowRoot, hops-1);
+      }
+      if (el.tagName === 'IFRAME' || el.tagName === 'FRAME') {
+        report.iframes_seen++;
+        var doc=null;
+        try { doc = el.contentDocument; } catch(e){ doc=null; }
+        if (doc) deep(doc, hops-1);
+        else report.iframes_blocked++;
+      }
+    }
+  }
+  var NEEDLE = norm('NEEDLE_HERE');
+  deep(document, report.hops);
+  matches.sort(function(a,b){return b.score-a.score;});
+  return { traversal: report, found_count: matches.length, top_matches: matches.slice(0,8) };
+})()
+"@
+  $js = $js -replace 'NEEDLE_HERE', $needleEscaped
+  $resp = _Cdp-WsCall -PageWsUrl $page.ws_url -Method "Runtime.evaluate" -Params @{
+    expression = $js
+    returnByValue = $true
+    awaitPromise = $false
+    timeout = 4000
+  }
+  if (-not $resp.ok) {
+    _Emit @{status="error"; reason="ws_call_failed"; detail=$resp.error} 1
+  }
+  $val = $null
+  try { $val = $resp.result.result.value } catch { $val = $null }
+  if (-not $val) {
+    _Emit @{status="partial"; reason="no_result"; page_id=$page.id; page_title=$page.title} 2
+  }
+  _Emit ([ordered]@{
+    status = "ok"
+    page_id = "$($page.id)"
+    page_url = "$($page.url)"
+    page_title = "$($page.title)"
+    traversal = $val.traversal
+    found_count = [int]$val.found_count
+    top_matches = @($val.top_matches)
+  })
+}
+
+# ============================================================================
+# v1.4.0 Action: ime-paste  ─ 한국어 IME-safe 텍스트 입력 (clipboard route)
+# ============================================================================
+# 동기: SendInput WM_CHAR 로 한글을 보내면 IME 가 조합 모드일 때 깨지거나 분리됨.
+# Notepad, Word, 브라우저 contenteditable 등에서 발생.
+# 해결: System.Windows.Forms.Clipboard 로 텍스트 임시 저장 → Ctrl+V 단축키로 paste.
+# 원래 클립보드 내용은 복원.
+#
+# 입력: -Text <string> [-PressEnter] [-TargetMatch <s>] [-TargetHwnd N]
+# 출력: { status, method=clipboard_paste, text_len, restored_clipboard, mouse_moved=false }
+#
+# 안전성:
+#   - hit-test 가드 (TargetMatch/TargetHwnd) 통과해야 paste
+#   - 클립보드 백업/복구
+#   - 마우스 안 움직임
+# ============================================================================
+function _Action-ImePaste {
+  if (-not $Text) {
+    _Emit @{status="error"; reason="missing_text"; recommended_action="provide -Text"} 1
+  }
+  Add-Type -AssemblyName System.Windows.Forms -ErrorAction Stop
+  Add-Type -AssemblyName System.Drawing -ErrorAction Stop
+
+  # hit-test 가드 — TargetMatch/TargetHwnd 가 있으면 현재 foreground 검증
+  $guardEvidence = $null
+  if ($TargetHwnd -gt 0 -or $TargetMatch) {
+    try {
+      $fg = [Win32Helper]::GetForegroundWindow()
+      $sb = New-Object System.Text.StringBuilder 512
+      [void][Win32Helper]::GetWindowText($fg, $sb, 512)
+      $title = $sb.ToString()
+      $hwndOk = ($TargetHwnd -gt 0 -and $TargetHwnd -eq [int]$fg)
+      $titleOk = ($TargetMatch -and $title -and ($title -match [regex]::Escape($TargetMatch)))
+      $guardEvidence = [ordered]@{
+        foreground_hwnd = [int]$fg
+        foreground_title = $title
+        match_hwnd = $hwndOk
+        match_title = $titleOk
+      }
+      if (-not ($hwndOk -or $titleOk)) {
+        _Emit @{status="blocked"; reason="target_mismatch"; guard=$guardEvidence; recommended_action="focus the target window first"} 3
+      }
+    } catch {
+      _Emit @{status="error"; reason="hit_test_failed"; detail=$_.Exception.Message} 1
+    }
+  }
+
+  # 클립보드 백업
+  $restored = $false
+  $oldText = $null
+  try {
+    if ([System.Windows.Forms.Clipboard]::ContainsText()) {
+      $oldText = [System.Windows.Forms.Clipboard]::GetText()
+    }
+  } catch { $oldText = $null }
+
+  try {
+    # SetText 는 STA thread 필요 — PowerShell 5.x 기본은 MTA 일 수 있음
+    # 안전하게 SetDataObject + true (persist) 사용
+    [System.Windows.Forms.Clipboard]::SetDataObject($Text, $true, 5, 100)
+    Start-Sleep -Milliseconds 60
+
+    # Ctrl+V 단축키 송출 (SendKeys 가 IME 우회)
+    [System.Windows.Forms.SendKeys]::SendWait("^v")
+    Start-Sleep -Milliseconds 80
+
+    if ($PressEnter) {
+      [System.Windows.Forms.SendKeys]::SendWait("{ENTER}")
+      Start-Sleep -Milliseconds 40
+    }
+  } catch {
+    _Emit @{status="error"; reason="paste_failed"; detail=$_.Exception.Message} 1
+  } finally {
+    # 클립보드 복구 (원래 내용이 있었던 경우만)
+    try {
+      if ($null -ne $oldText) {
+        [System.Windows.Forms.Clipboard]::SetDataObject($oldText, $true, 5, 100)
+        $restored = $true
+      }
+    } catch { $restored = $false }
+  }
+
+  _Emit ([ordered]@{
+    status = "ok"
+    method = "clipboard_paste"
+    text_len = [int]$Text.Length
+    pressed_enter = [bool]$PressEnter
+    restored_clipboard = $restored
+    guard = $guardEvidence
+    mouse_moved = $false
+  })
+}
+
+# ============================================================================
+# v1.4.0 Action: modal-detect  ─ 모달/팝업/대화상자 감지 (UI recovery loop 용)
+# ============================================================================
+# 동기: 라이브 step 이 실패한 후, "왜 실패했지?" 를 답하기 위해 화면에 새로 떴거나
+# 사라진 모달/대화상자를 자동 감지해서 다음 안전한 retry 경로를 제안.
+# 메모: 이 액션은 read-only — 어떤 클릭도 안 하고 UIA tree + window enum 만.
+#
+# 입력: [-Match <s>] [-TargetHwnd N]
+# 출력: {
+#   status, foreground: { hwnd, title, class },
+#   modal_candidates: [{ hwnd, title, class, role, score, reason }],
+#   recommended_action: "dismiss | confirm | wait | observe"
+# }
+# ============================================================================
+function _Action-ModalDetect {
+  Add-Type -AssemblyName UIAutomationClient -ErrorAction SilentlyContinue
+  Add-Type -AssemblyName UIAutomationTypes -ErrorAction SilentlyContinue
+  $candidates = @()
+  $fgInfo = $null
+  try {
+    $fg = [Win32Helper]::GetForegroundWindow()
+    $sb = New-Object System.Text.StringBuilder 512
+    [void][Win32Helper]::GetWindowText($fg, $sb, 512)
+    $clsB = New-Object System.Text.StringBuilder 256
+    [void][Win32Helper]::GetClassName($fg, $clsB, 256)
+    $fgInfo = [ordered]@{
+      hwnd = [int]$fg
+      title = $sb.ToString()
+      class = $clsB.ToString()
+    }
+  } catch { $fgInfo = $null }
+
+  # UIA: WindowPattern 의 IsModal=true 또는 control type Window/Pane 중 작은 사이즈
+  try {
+    $root = [System.Windows.Automation.AutomationElement]::RootElement
+    $cond = New-Object System.Windows.Automation.OrCondition @(
+      (New-Object System.Windows.Automation.PropertyCondition `
+        ([System.Windows.Automation.AutomationElement]::ControlTypeProperty),
+        ([System.Windows.Automation.ControlType]::Window)),
+      (New-Object System.Windows.Automation.PropertyCondition `
+        ([System.Windows.Automation.AutomationElement]::ControlTypeProperty),
+        ([System.Windows.Automation.ControlType]::Pane))
+    )
+    $els = $root.FindAll([System.Windows.Automation.TreeScope]::Children, $cond)
+    foreach ($el in $els) {
+      try {
+        $name = "$($el.Current.Name)"
+        $cls  = "$($el.Current.ClassName)"
+        $rect = $el.Current.BoundingRectangle
+        $isModal = $false
+        try {
+          $wp = $el.GetCurrentPattern([System.Windows.Automation.WindowPattern]::Pattern)
+          if ($wp -and $wp.Current.IsModal) { $isModal = $true }
+        } catch { }
+        $reason = $null
+        $score = 0
+        if ($isModal) { $score += 100; $reason = "uia_window_is_modal" }
+        # 흔한 dialog class names
+        if ($cls -match "(?i)#32770|MessageBox|Dialog|TaskDialog|Popup") {
+          $score += 60
+          if (-not $reason) { $reason = "dialog_class_name" }
+        }
+        # 작은 윈도우 (~600x400 이하) + 짧은 제목
+        if ($rect -and $rect.Width -gt 0 -and $rect.Width -lt 900 -and $rect.Height -gt 0 -and $rect.Height -lt 600) {
+          $score += 20
+          if (-not $reason) { $reason = "small_window_size" }
+        }
+        if ($score -gt 0) {
+          $hwndProp = $null
+          try { $hwndProp = [int]$el.Current.NativeWindowHandle } catch { $hwndProp = $null }
+          $candidates += [ordered]@{
+            hwnd = $hwndProp
+            title = $name
+            class = $cls
+            role = "$($el.Current.LocalizedControlType)"
+            rect = [ordered]@{ x=[int]$rect.X; y=[int]$rect.Y; w=[int]$rect.Width; h=[int]$rect.Height }
+            score = $score
+            reason = $reason
+            is_modal = $isModal
+          }
+        }
+      } catch { continue }
+    }
+  } catch { }
+
+  # 가장 점수 높은 후보로 추천 행동
+  $sorted = @($candidates | Sort-Object -Property score -Descending)
+  $rec = "observe"
+  if ($sorted.Count -gt 0) {
+    $top = $sorted[0]
+    if ($top.is_modal -or ($top.score -ge 100)) { $rec = "dismiss_or_confirm" }
+    elseif ($top.score -ge 60) { $rec = "confirm_dialog" }
+    else { $rec = "wait" }
+  }
+  _Emit ([ordered]@{
+    status = "ok"
+    foreground = $fgInfo
+    modal_candidates = $sorted
+    candidate_count = [int]$sorted.Count
+    recommended_action = $rec
+  })
+}
+
+# ============================================================================
 # Dispatch
 # ============================================================================
 switch ($Action) {
@@ -2864,8 +4367,16 @@ switch ($Action) {
   "ocr-uia-invoke"  { _Action-OcrUiaInvoke }
   "screenshot-diff" { _Action-ScreenshotDiff }
   "hit-test"        { _Action-HitTest }
+  "hit-scan"        { _Action-HitScan }
   "cdp-detect"      { _Action-CdpDetect }
   "cdp-eval"        { _Action-CdpEval }
   "cdp-type"        { _Action-CdpType }
   "cdp-click"       { _Action-CdpClick }
+  "cdp-smart-click" { _Action-CdpSmartClick }
+  "cdp-smart-find"  { _Action-CdpSmartFind }
+  "cdp-smart-type-find" { _Action-CdpSmartTypeFind }
+  "cdp-smart-type"  { _Action-CdpSmartType }
+  "cdp-deep-find"   { _Action-CdpDeepFind }
+  "ime-paste"       { _Action-ImePaste }
+  "modal-detect"    { _Action-ModalDetect }
 }

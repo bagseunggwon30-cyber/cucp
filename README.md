@@ -2,15 +2,20 @@
 
 CUCP는 Codex/Kiro 같은 AI 에이전트가 Windows 데스크톱을 자동으로 관찰하고 조작하기 위한 control plane. Win32 API + UIA + System.Drawing + Windows.Media.Ocr + Chrome DevTools Protocol을 결합해서 표준 앱부터 Electron 앱까지 다룬다.
 
+**최신 버전: v1.4.0** — 6 missing items (DOM bridge v2 / coordinate precision validation / UI recovery loop / Korean IME / benchmark suite / packaging) 100% 구현 + secret redaction 보안 보완.
+
 ## 주요 기능
 
 | 영역 | 기능 |
 |---|---|
 | **관찰** | window enum, foreground 추출, UIA tree, OCR (한국어/영어/일본어/중국어) |
-| **조작** | UIA Pattern.Invoke (마우스 안 움직임), Win32 SendInput, OCR+UIA fusion |
-| **검증** | screenshot diff (픽셀 단위), hit-test guard, click-and-verify-screen |
+| **조작** | UIA Pattern.Invoke (마우스 안 움직임), Win32 SendInput, OCR+UIA fusion, IME-safe paste |
+| **검증** | screenshot diff (픽셀 단위), hit-test guard, click-and-verify-screen, precision-validate |
 | **학습** | smart-click history learning (5회 lookback) |
-| **Electron** | CDP 통합 (DOM 직접 접근, 좌표 무관) |
+| **Electron** | CDP 통합 (DOM 직접 접근, Shadow DOM/iframe deep traversal, 좌표 무관) |
+| **복구** | modal-detect / recovery-plan / recovery-run (UI failure recovery loop) |
+| **벤치마크** | read-only benchmark (p50/p95/avg + per-target SLO) |
+| **패키징** | release-notes (CHANGELOG 자동 split + secret redaction) |
 
 ## 설치
 
@@ -89,9 +94,11 @@ cucp-computer-use/
 
 ## 검증 상태
 
-- Pester: **109/109 통과** (~178초)
+- Pester: **191/191 통과** (학원본 베이스라인 177 + v1.4.0 신규 14)
 - self-test: 6/6 passed
 - quick_validate: Skill is valid!
+- AST parse: 3파일 모두 OK
+- Secret redaction: 합성 CHANGELOG 의 PAT/sk-/AKIA/Bearer 4종 모두 [REDACTED:*] 검증
 
 ## 한계
 
@@ -100,6 +107,7 @@ cucp-computer-use/
 - ProseMirror/TipTap 같은 contenteditable 에디터: CDP 의 단순 execCommand 거부 — `Input.insertText` 추후 sprint에서 처리
 - 매우 작은 폰트 (<8pt): OCR 정확도 떨어짐
 - Windows 10/11 전용 (Windows.Media.Ocr 의존)
+- Cross-origin iframe 은 보안상 traversal 차단됨 (`iframes_blocked` 카운트로 보고)
 
 ## 라이선스
 

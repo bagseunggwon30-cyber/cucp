@@ -1,5 +1,620 @@
 # CUCP Changelog
 
+## v1.4.0 — 6 missing items 100% 구현 + 보안 보완 (2026-05-27)
+
+### 큰 틀 목표 달성
+
+학원본 `remaining-work.md` 의 진행률 82-84% / 6 missing items 모두 구현해서 100% 도달.
+이전 4.6 작업의 누락분이었던 release-notes secret redaction / sensitive recovery gate /
+PII 미수집 benchmark 도 함께 보완.
+
+### Added — Native helper (3개 신규 action)
+
+- **`-Action cdp-deep-find -CdpText <s> [-CdpPort N] [-CdpPageMatch <s>]`** (read-only)
+  - Shadow DOM + same-origin iframe deep traversal report (최대 4 hops, 1200 nodes).
+  - 출력: `traversal: { hops, shadow_roots_seen, iframes_seen, iframes_blocked, total_nodes }`,
+    `top_matches[]`. cross-origin iframe 안전 skip.
+- **`-Action ime-paste -Text <s> [-PressEnter] [-TargetMatch <s>] [-TargetHwnd N]`** (live)
+  - 한국어 IME-safe paste: `System.Windows.Forms.Clipboard` 백업 → 텍스트 set →
+    `SendKeys "^v"` → 클립보드 복구. 마우스 안 움직임. hit-test 가드 통과 필수.
+- **`-Action modal-detect [-Match <s>] [-TargetHwnd N]`** (read-only)
+  - UIA WindowPattern.IsModal + dialog class name (`#32770` / `MessageBox` / `TaskDialog`) +
+    작은 윈도우 크기 점수화. `recommended_action: dismiss_or_confirm | confirm_dialog | wait | observe`.
+
+### Added — Wrapper macros (9개 신규)
+
+- **`macro cdp-deep-find --text <s> [--page-match <s>] [--port N]`** (read-only)
+  - schema `cucp.cdp-deep-find/v1`. 디버깅 / 벤치마크용 traversal 메타정보 노출.
+- **`macro ime-paste --text <s> [--press-enter] [--target-match <s>] [--target-hwnd N]`** (live)
+  - schema `cucp.ime-paste/v1`. `-AllowLiveControl` 필수.
+- **`macro safe-type-ime --text <s> [--target-match <s>] [--press-enter] [--verify-title <s>]`** (live)
+  - schema `cucp.safe-type-ime/v1`. focus → ime-paste → 선택적 verify. `safe-type` race condition 회피.
+- **`macro modal-detect [--match <s>] [--target-hwnd N]`** (read-only)
+  - schema `cucp.modal-detect/v1`.
+- **`macro recovery-plan [--match <s>] [--failed-step <s>] [--failed-reason <s>]`** (read-only)
+  - schema `cucp.recovery-plan/v1`. modal-detect + foreground 결과 → rank 된 recovery_candidates[].
+- **`macro recovery-run [--match <s>] [--dry-run] [--confirm-sensitive]`** (live, sensitive)
+  - schema `cucp.recovery-run/v1`. live action 은 `-AllowLiveControl + --confirm-sensitive` 둘 다 필수.
+  - 그 외엔 exit 3 (`reason=sensitive_recovery_requires_confirmation`).
+- **`macro precision-validate --x N --y N [--target-match <s>] [--samples N]`** (read-only)
+  - schema `cucp.precision-validate/v1`. drift_max / drift_avg / stable 측정.
+  - recommendation: `safe_to_use_anchor` / `use_with_micro_refine` / `use_uia_pattern_or_relabel`.
+- **`macro benchmark [--iters N]`** (read-only, 1~10)
+  - schema `cucp.benchmark/v1`. 4 read-only target 의 p50/p95/avg + per-target SLO + slo_pass_rate.
+  - PII/텍스트 미수집, 타이밍/카운트만.
+- **`macro release-notes [--version X] [--since X]`** (read-only)
+  - schema `cucp.release-notes/v1`. CHANGELOG 자동 split + highlights/added/improved/verified/fixed.
+  - **보안: secret 패턴 자동 redact** (PAT/sk-/AKIA/Bearer/JWT/PEM 6종).
+
+### Improved — DOM bridge v2 (자동 적용)
+
+- 기존 `cdp-smart-find` / `cdp-smart-type` / `cdp-smart-type-find` 가 `deepCollect()` 로
+  light DOM 1뎁스가 아니라 **Shadow DOM + same-origin iframe** 안까지 traversal.
+- 최대 4 hops, 1200 nodes 캡, 동일 element 중복 제거.
+- Slack / Discord / Notion 같은 chromium 앱의 web component / nested iframe 안 입력란도 잡힘.
+
+### Improved — Workflow allowlist
+
+- `workflow-plan / workflow-run` 의 `$readOnlyMacros` 에 6개 신규 read-only 매크로 등록
+  (cdp-deep-find / modal-detect / recovery-plan / precision-validate / benchmark / release-notes).
+- `$liveMacros` 에 3개 신규 live 매크로 등록 (ime-paste / safe-type-ime / recovery-run).
+
+### Security (4.6 누락분 보정)
+
+- `_Cucp-RedactSecrets` 헬퍼 추가: GitHub PAT (ghp_/gho_/ghs_/...), OpenAI sk-, AWS AKIA,
+  Bearer/JWT, PEM private key block 패턴을 출력 직전 `[REDACTED:tag]` 로 치환.
+- `release-notes` 가 모든 항목 emit 직전 redact 적용.
+- `recovery-run` 의 sensitive gate (`--confirm-sensitive` 강제) 로 부주의한 dismiss/confirm 차단.
+- `benchmark` 의 측정 결과에 입력 텍스트 / 사용자 데이터 미포함.
+- `safe-type-ime` 의 클립보드 백업/복구 보장.
+
+### Verified
+
+- AST parse: cucp.ps1 / cucp-native-helper.ps1 / cucp.Tests.ps1 모두 OK.
+- Pester: 학원본 베이스라인 177/177 + v1.4.0 신규 14건 추가 (총 191건).
+- Sanity check 라이브: 9개 매크로 모두 의도된 envelope schema + exit code 반환.
+- Secret redaction 검증: 합성 CHANGELOG 의 PAT / sk- / AKIA / Bearer 4종 모두 `[REDACTED:*]` 치환.
+
+### Limits
+
+- DXGI capture / multi-monitor coord-anchor / macOS-Linux 포팅은 v1.5+ 후보.
+- ProseMirror 라이브 입력은 v1.3.0 부터 known limitation (CDP `Input.insertText` 추후 sprint).
+
+---
+
+## v1.3.35 - Practical task preset expansion (2026-05-26)
+
+### Added
+
+- Expanded `macro task-preset` beyond `document` and `mail`.
+- Added workflow-style presets for `form-submit`, `file-upload`, `file-download`, and `settings`.
+- New workflow presets preserve ordered steps such as upload button click -> file dialog wait -> guarded file path entry.
+- Preset output now includes `generated_workflow_plan_command`, `generated_workflow_dry_run_command`, and `generated_workflow_run_command` when a task is better represented as a workflow than a single `task-plan`.
+
+### Verified
+
+- Added regression coverage for the new form submit, upload, download, and settings presets.
+
+---
+
+## v1.3.34 - Safety policy layer (2026-05-26)
+
+### Added
+
+- Added `macro safety-classify` with schema `cucp.safety-classify/v1` for read-only classification of sensitive actions.
+- `workflow-plan` now annotates each step with safety evidence and reports `sensitive_step_count`.
+- `workflow-run`, `task-run`, `form-run`, and direct sensitive live macros now block payment, credential, destructive, send/publish, identity/privacy, system-change, and settings-change actions unless `--confirm-sensitive` is supplied.
+- Added machine-readable blocked responses with `reason=sensitive_action_requires_confirmation` and concrete `safety_issues`.
+
+### Verified
+
+- Added regression coverage for classification, workflow-plan safety annotations, blocked sensitive workflow execution, and confirmed execution passing the safety gate.
+
+---
+
+## v1.3.33 - Coordinate precision live defaults (2026-05-26)
+
+### Added
+
+- `click-point` now enables micro-refine by default when a target guard is present via `--target-match` or `--target-hwnd`.
+- Added `--no-micro-refine` and `--no-anchor-history` opt-outs for guarded live coordinate clicks.
+- Guarded live clicks now score anchor reuse before clicking and record the normalized anchor after successful clicks.
+- Successful guarded click JSON can include `micro_refine`, `auto_micro_refine`, and `anchor_reuse` evidence.
+- `smart-plan --precision-points` now emits `precision_policy` so generated plans preserve target validation and live click precision defaults.
+
+### Verified
+
+- Added regression coverage for `precision_policy`; full Pester suite passes on the working copy.
+
+---
+
+## v1.3.32 - CDP DOM bridge plan packaging (2026-05-26)
+
+### Added
+
+- `cdp-smart-find`, `cdp-smart-type-find`, `cdp-smart-click`, and `cdp-smart-type` now include `dom_bridge_plan` with schema `cucp.cdp-dom-bridge-plan/v1` when CDP is unavailable.
+- The DOM bridge plan includes read-only command, live command, selector ranking priorities, and fallback order so another agent can continue without guessing a coordinate route.
+- CDP page selection now scores page candidates by explicit `--page-match`, page/webview type, title/url quality, and DevTools/worker penalties.
+- Successful smart DOM resolutions now expose `page_selection`, `selector_candidates`, `locator_candidates`, and `candidate_summaries` for CSS selector or Playwright-style locator reuse.
+
+### Verified
+
+- Added regression coverage for wrapper and native-helper closed-port DOM bridge plan output.
+
+---
+
+## v1.3.31 - App profile strategy scoring (2026-05-26)
+
+### Added
+
+- `macro app-profile` now emits `strategy_score` with schema `cucp.app-profile-strategy-score/v1`.
+- The score combines CDP availability, UIA affordance and label-hit evidence, OCR/vision fallback need, app type, and prior app strategy history.
+- Added `strategy_persistence` plus `--record-strategy`, `--remember-strategy`, and `--no-strategy-history`.
+- Medium/high confidence app-profile recommendations can be persisted to `%TEMP%\computer-use-control-plane\app-strategy-history.ndjson` and reused as a last-good app-level route hint.
+
+### Verified
+
+- Added regression coverage for the app-profile strategy score envelope on partial/no-window profiles.
+- Fixed duplicate `Path`/`PATH` process environment normalization so PowerShell 5 child-process based tests can run under Codex/IDE launchers.
+
+---
+
+## v1.3.30 - Anchor reuse history scoring (2026-05-26)
+
+### Added
+
+- `macro coord-anchor --record-history`: optionally records verified layout-relative anchors to an audit NDJSON file.
+- `coord-anchor` now reports `reuse_history` with schema `cucp.anchor-reuse-score/v1`, including exact/near match counts, reuse score, confidence, coordinate signature match, last seen point, warnings, and recommendation.
+- Reuse scoring helps AI callers avoid blindly trusting stale absolute coordinates after window moves, resizes, or display changes.
+
+### Verified
+
+- Added regression coverage for recording an anchor and reading a later reuse score.
+
+---
+
+## v1.3.29 - Pre-click target validation (2026-05-26)
+
+### Added
+
+- `macro target-validate`: read-only safety judgement for a coordinate before a live click.
+- The validator wraps `point-plan` and reports `safe_to_click`, target guard status, coordinate risk, confidence, target size class, support count, native clickable evidence, edge distance, warnings, and errors.
+- The live `recommended_command` is only surfaced when the coordinate is target-guarded and passes the validation gates.
+- `target-validate` is allowed as a read-only workflow step.
+
+### Verified
+
+- Added regression coverage for `target-validate` output and workflow read-only classification.
+
+---
+
+## v1.3.28 - Layout-relative coordinate anchors (2026-05-26)
+
+### Added
+
+- `macro coord-anchor`: read-only conversion of a screen point into a reusable window-normalized anchor.
+- Anchor output includes `anchor_id`, normalized window point, visible-normalized point, current target window evidence, restore `coord-map` command, and immediate `point-plan` commands.
+- This gives AI callers a safer way to persist tiny UI targets across window moves/resizes instead of storing stale absolute screen coordinates.
+- `coord-anchor` is allowed as a read-only workflow step.
+
+### Verified
+
+- Added regression coverage for creating a normalized coordinate anchor and its restore/point-plan commands.
+
+---
+
+## v1.3.27 - Window/screen coordinate mapping (2026-05-26)
+
+### Added
+
+- `macro coord-map`: read-only conversion between screen, window-local, visible-window-local, normalized, and visible-normalized coordinates.
+- `coord-map` returns the selected window rect, visible clip, screen point, window point, normalized point, embedded coordinate profile, and warnings.
+- This helps AI/OCR/vision callers map a point found in a cropped window screenshot back to the real screen coordinate before `point-plan` or live control.
+- Coordinate risk now treats `target-hwnd` hit-test mismatch as high risk, catching overlapped-window cases even when the coordinate is inside the target window rectangle.
+- `coord-map` is allowed as a read-only workflow step.
+
+### Verified
+
+- Added regression coverage for window-local to screen coordinate conversion.
+
+---
+
+## v1.3.26 - Coordinate profile and DPI-aware point planning (2026-05-26)
+
+### Added
+
+- `macro coord-profile`: read-only DPI/monitor/window coordinate profile for a point and optional target window.
+- Coordinate profiles include virtual screen bounds, per-monitor DPI/scale, target window rect, point-relative coordinates, edge distance, hit-test evidence, warnings, and `coordinate_risk`.
+- `point-plan` now embeds `coordinate_profile`, reports `mouse_moved=false` for the read-only planner, and includes the coordinate signature in its cache key so monitor/DPI layout changes do not reuse stale precision points.
+- `coord-profile` is allowed as a read-only workflow step.
+
+### Verified
+
+- Added regression coverage for `coord-profile` and the embedded `coordinate_profile` in `point-plan`.
+
+---
+
+## v1.3.25 - App profile capability probes (2026-05-26)
+
+### Added
+
+- `macro app-profile --auto-probe`, `--probe-cdp`, and `--probe-uia` add read-only capability probes to the app profile.
+- Browser/Electron profiles now run a cheap CDP port probe by default unless `--no-probe` is set.
+- CDP is recommended only when the probe confirms an available DevTools endpoint, which avoids slow closed-port checks during later `smart-plan` work.
+- UIA probing reports affordance count, small icon count, role distribution, sample elements, and requested label hits.
+- UIA affordance probing can now target an exact HWND, reducing accidental full-desktop scans when titles are ambiguous or localized.
+- Output now includes `capability_probes.cdp` and `capability_probes.uia`.
+
+### Verified
+
+- Added a regression test for closed CDP port reporting through `app-profile --probe-cdp`.
+
+---
+
+## v1.3.24 - App automation profile (2026-05-26)
+
+### Added
+
+- `macro app-profile`: a read-only app strategy profiler that inspects the current or matched window, classifies the app surface, and recommends a control route order.
+- Browser/Electron targets now get CDP/DOM-first guidance when available, with UIA, OCR, and precision-point fallbacks.
+- PLC/SCADA-style Win32 targets now get UIA, guarded hit-test, precision-point, OCR, and vision-precise route guidance.
+- Output includes `recommended_task_options`, `suggested_task_plan_prefix`, and per-label read-only `smart-plan` probe commands.
+- `workflow-plan`/`workflow-run` now classify `app-profile` as read-only.
+
+### Verified
+
+- Added regression tests for unmatched-window partial output and workflow read-only classification.
+
+---
+
+## v1.3.23 - Document/mail task presets (2026-05-26)
+
+### Added
+
+- `macro task-preset --kind document`: creates a read-only document workflow preset using `task-plan`, with optional replace and save shortcut steps.
+- `macro task-preset --kind mail`: creates a read-only mail workflow preset from To/Subject/Body/send inputs, with CDP enabled by default unless `--no-cdp` is set.
+- Preset output includes generated `task-plan` and `task-run` commands plus the embedded `task_plan`, so an AI caller can dry-run before live control.
+
+### Verified
+
+- Added a regression test for the document preset generating task-plan/task-run commands.
+
+---
+
+## v1.3.22 - Workflow failure summary for AI callers (2026-05-26)
+
+### Added
+
+- `workflow-run` now emits `failure_summary` and top-level `next_action` when a workflow ends as `partial`.
+- Failure summaries classify command failures, window verification failures, label verification failures, retry exhaustion, and skipped live-step retries.
+- `task-run` surfaces `workflow_failure_summary` and `next_action` from the nested workflow result.
+
+### Verified
+
+- Added regression tests for label-verification failure summaries, retry-exhaustion summaries, and task-run failure summary propagation.
+
+---
+
+## v1.3.21 - Per-step label verification (2026-05-26)
+
+### Added
+
+- `macro workflow-run --verify-label-after-step <label>`: runs a read-only `wait-label` check after each executed step.
+- `--verify-label-window`, `--verify-label-timeout-ms`, and `--verify-label-interval-ms` tune the label verification scope and polling cost.
+- Label verification failures integrate with existing `--retry-failed-step` retry logic.
+- `task-plan` forwards label verification options into generated workflow commands.
+
+### Verified
+
+- Added regression tests for label verification failure handling and task-plan forwarding of per-step label verification options.
+
+---
+
+## v1.3.20 - Bounded workflow step retry (2026-05-26)
+
+### Added
+
+- `macro workflow-run --retry-failed-step <n>`: retries a failed step up to a bounded count, recording every attempt in the step result.
+- `--retry-delay-ms`: adds a short delay between retry attempts.
+- `--retry-live-steps`: explicit opt-in for retrying live-control steps; without it, live steps are not repeated even when retry is requested.
+- `task-plan` forwards retry options into its generated `workflow-run` and `workflow-run --dry-run` commands.
+
+### Verified
+
+- Added regression tests for read-only step retry counts and task-plan forwarding of retry options.
+
+---
+
+## v1.3.19 - Workflow settle and observation gates (2026-05-26)
+
+### Added
+
+- `macro workflow-run --settle-ms`: waits briefly after each executed step so UI transitions can settle before the next step.
+- `workflow-run --observe-after-step`: captures a cheap `macro windows --json-only` observation after every executed step.
+- `workflow-run --verify-after-step --verify-match <window>`: treats a missing post-step window observation as a verification failure and stops unless `--continue-on-error` is used.
+- `task-plan` now forwards settle/observe/verify options into its returned `workflow-run` and `workflow-run --dry-run` commands.
+
+### Verified
+
+- Added regression tests for post-step observation, verification failure handling, and task-plan forwarding of workflow verification options.
+
+---
+
+## v1.3.18 - Generic task text and shortcut steps (2026-05-26)
+
+### Added
+
+- `macro task-plan --type-text`: adds a generic typing step for document-style workflows.
+- `task-plan --pre-shortcut` and `--shortcut`/`--keys`: add keyboard steps before or after the main typing/click workflow, covering flows such as select-all, write text, then save.
+- When `--type-text` is combined with `--match`, the planner emits guarded `safe-type`; without `--match`, it emits faster `type-native`.
+
+### Verified
+
+- Added regression tests for text/shortcut task planning and `task-run --dry-run` validation of guarded type workflows.
+
+---
+
+## v1.3.17 - Task-run gated executor (2026-05-26)
+
+### Added
+
+- `macro task-run`: gated executor for `task-plan` that supports `--dry-run`, `--include-plan`, and `--continue-on-error`.
+- `task-run` builds the task plan first, blocks unsafe plans, requires `-AllowLiveControl` only when a safe plan contains live steps, and delegates execution to `workflow-run`.
+- Output schema `cucp.task-run/v1` includes the task plan when requested or dry-running, the internal `workflow_result`, workflow exit code, and execution status.
+
+### Verified
+
+- Added regression tests for `task-run --dry-run`, live gate behavior, and unsafe-plan blocking.
+- Manual dry-run validated an app-launch task through internal `workflow-run` without launching the app.
+
+---
+
+## v1.3.16 - App/form task planner (2026-05-26)
+
+### Added
+
+- `macro task-plan`: read-only planner that combines app launch, window wait, form-plan field/click steps, extra click labels, and verify labels into a single `workflow-run` command.
+- Output schema `cucp.task-plan/v1` includes `workflow_plan`, `recommended_command`, `dry_run_command`, embedded `form_plan`, live/read-only step counts, and unsafe planning errors.
+- `form-plan` now forwards `--precision-points`, precision radius/step, and point cache TTL to the send-label `smart-plan` step so form workflows can use micro-refined button routes.
+
+### Verified
+
+- Added regression tests for task-plan app launch workflow generation, unsafe form wrapping, and form-plan precision option acceptance.
+- All work remains read-only unless the returned workflow command is later run with `-AllowLiveControl`.
+
+---
+
+## v1.3.15 - Smart-click precision point execution path (2026-05-26)
+
+### Improved
+
+- `smart-click --allow-mouse-fallback --precision-points` now routes Stage 2 UIA coordinate fallback through `click-point --micro-refine`.
+- The live path reuses the same precision radius/step and short point cache used by `point-plan`, after the fast Win32 guard confirms the target window.
+- `uia_precision_point` is recorded as its own strategy, but default history behavior does not let it skip faster no-mouse UIA Pattern attempts unless `--prefer-history` is set.
+
+### Verified
+
+- Added a regression test proving `smart-click --precision-points` accepts the new options and returns partial on an unmatched target without clicking.
+- Parser checks and focused Pester coverage pass without live mouse movement.
+
+---
+
+## v1.3.14 - Smart-plan precision point route (2026-05-26)
+
+### Improved
+
+- `smart-plan --precision-points` can now recommend a `uia_precision_point` route when UIA finds a label but the element has no direct InvokePattern.
+- The new route emits a guarded `click-point --micro-refine` command with `--target-match`, precision radius/step, and point cache TTL so tiny controls can be clicked with the same pre-click scan used by `point-plan`.
+- `click-point --micro-refine` can reuse a fresh `point-plan-*` cache entry after the fast Win32 guard confirms the same root window, reducing repeated tiny-target click latency.
+
+### Verified
+
+- Added a read-only regression test for `smart-plan --precision-points`.
+- Parser checks and focused Pester coverage pass without moving the mouse.
+
+---
+
+## v1.3.13 - Point-plan short TTL cache (2026-05-26)
+
+### Improved
+
+- `point-plan` now uses a short TTL cache keyed by coordinate, scan radius/step, click inset, target guard, and the current root window evidence.
+- Repeated point analysis on the same small UI target can return `from_cache=true` without re-running the heavier UIA `hit-scan`.
+- `point-plan --no-cache` / `--cache-ttl 0` forces a fresh scan for moving or rapidly changing UI.
+- `macro session clear-cache` now clears both appshot caches and `point-plan-*` cache files; `session info` reports `point_plan_cache_files`.
+
+### Verified
+
+- Added a regression test proving the second identical `point-plan` call reuses the TTL cache.
+- Cache hits still run the wrapper Win32 fast guard first and refresh `precheck` evidence before returning.
+
+---
+
+## v1.3.12 - Precision point planner and micro-refine click (2026-05-26)
+
+### Added
+
+- `macro point-plan --x N --y N [--radius N] [--step N] [--target-match <s>]`: read-only precision click planner for tiny buttons, tabs, checkboxes, and near-edge coordinates.
+- `point-plan` combines wrapper Win32 fast guard evidence with native `hit-scan` UIA `ClickablePoint` ranking, then emits a guarded `recommended_command`.
+- `click-point --micro-refine [--precision-radius N] [--precision-step N]`: live coordinate click can re-run a small `hit-scan` immediately before clicking and use the refined point.
+- `click-point --micro-refine` blocks by default if the pre-click micro scan cannot produce a safe point; `--allow-unrefined` is the explicit fallback.
+
+### Verified
+
+- Parser checks passed for `cucp.ps1`.
+- Point planning and fast guard tests cover read-only `point-plan`, workflow read-only classification, and `click-point --micro-refine` blocking before any mismatched live click.
+
+---
+
+## v1.3.11 - Read-only workflow execution (2026-05-26)
+
+### Improved
+
+- `workflow-run` now builds the workflow plan first and requires `-AllowLiveControl` only when the plan contains live-control steps.
+- Read-only workflows such as `hit-test --fast`, `windows`, `form-plan`, and health checks can run without live-control authorization.
+- Child step invocation now adds `-AllowLiveControl` only to steps classified as live.
+
+### Why
+
+Agents need to run observe/verify workflows often. Keeping read-only workflows executable without live permission makes the Observe -> Think -> Act -> Verify loop faster and safer, while preserving the live gate for clicks, typing, app launch, and other actuation.
+
+---
+
+## v1.3.10 - Generic workflow planner/runner (2026-05-26)
+
+### Added
+
+- `workflow-plan --step "macro ..."`: read-only macro sequence planner that parses steps, classifies read-only vs live-control macros, and blocks unknown or recursive workflow steps.
+- `workflow-run --dry-run`: validates a workflow without executing it and returns `cucp.workflow-run/v1` with `status=ready` or `blocked`.
+- `workflow-run` live execution path: runs allowlisted macro steps in order only with `-AllowLiveControl`, stops on first failure by default, and records a trajectory summary.
+
+### Why
+
+This gives AI agents a safer bridge from individual actions to full app workflows: open/focus an app, wait for a window, plan or run a form, use guarded coordinates, and verify, all as one auditable sequence instead of ad hoc one-off calls.
+
+---
+
+## v1.3.9 - Guarded raw coordinate click (2026-05-26)
+
+### Improved
+
+- `click-point` now accepts `--target-match`, `--target-hwnd`, `--refine uia-safe`, `--click-inset`, and `--no-fast-guard`.
+- When a target is supplied, `click-point` performs a wrapper-level Win32 fast guard before any live click and blocks with schema `cucp.click-point/v1` if the point is outside the intended app.
+- The same target guard is still passed to the native helper click action, so live coordinate clicks have both precheck and final guard coverage.
+
+### Why
+
+Raw coordinate click is sometimes necessary for canvas or custom app surfaces. It now has the same cheap app-boundary safety behavior as planning tools, plus optional UIA micro refinement for tiny controls.
+
+---
+
+## v1.3.8 - Batch point guard (2026-05-26)
+
+### Added
+
+- `hit-test-batch --point "x,y" ...` / `--points "x,y;x,y"`: read-only wrapper-level Win32 batch point guard.
+- Output schema `cucp.hit-test-batch/v1` includes per-point window/process evidence, errors for malformed coordinates, `safe_to_act`, and `source=wrapper_win32_fast`.
+
+### Why
+
+AI agents often compare several nearby candidate coordinates before choosing a tiny control. Batch mode avoids paying one wrapper/helper round-trip per coordinate and keeps UIA out of the fast guard path.
+
+---
+
+## v1.3.7 - Fast point guard split (2026-05-26)
+
+### Improved
+
+- `hit-test --fast` now uses a wrapper-level Win32 `WindowFromPoint` path and skips UIA refinement entirely.
+- JSON output marks the path with `source=wrapper_win32_fast` and `uia_skipped=true` so agents can distinguish quick window guards from precision UIA analysis.
+
+### Why
+
+Click safety checks need to be cheap during agent loops. Use `hit-test --fast` for rapid "is this point inside the intended app?" checks, and reserve `hit-test` / `hit-scan` without `--fast` for tiny-control precision analysis.
+
+---
+
+## v1.3.6 - Micro coordinate scan (2026-05-26)
+
+### Added
+
+- `hit-scan --x N --y N [--radius N] [--step N]`: read-only micro coordinate scanner for tiny buttons, tabs, checkboxes, and edge-hit cases.
+- Native `-Action hit-scan` samples the point and optional nearby grid, applies the same UIA `ClickablePoint` refinement, checks target-window guards, ranks candidates by score, support, native clickable point, and distance.
+
+### Improved
+
+- Default `hit-scan` is intentionally fast: radius `0` means one-point analysis. Agents can opt into denser scans only when a coordinate is near a small-control boundary.
+
+---
+
+## v1.3.5 - Multi-step form planner (2026-05-26)
+
+### Added
+
+- `form-plan --field "Label=Value" ... --send-label <button>`: read-only workflow planner for mail, document, chat, ticket, and app form tasks.
+- `form-run --field "Label=Value" ... --send-label <button>`: gated workflow executor that runs `form-plan` first and executes only when every planned step is safe.
+- `form-plan` composes the existing `smart-plan` routes per step, so it can rank CDP DOM, UIA ValuePattern, UIA Pattern, guarded coordinate, and optional OCR routes before any live action.
+- JSON output now includes `command_plan[]` for ordered agent execution and `unsafe_steps[]` for the labels that still need narrowing.
+- `cdp-eval --expr-b64 <base64>` for long or quote-heavy JavaScript expressions used in DOM planning tests and browser workflows.
+
+### Why
+
+This moves CUCP closer to the target of AI-operated app workflows: instead of asking the AI to click/type one label at a time, it can plan a whole "fill fields, then submit/save" sequence, prove the path is safe, and only then request live-control authorization.
+
+---
+
+## v1.3.4 — Smart input planner (2026-05-26)
+
+### Added
+
+- `smart-plan --label <field> --type-text <value>`: read-only input route planner for document/mail/chat style workflows.
+- `cdp-smart-type-find --label <field>` / native `-Action cdp-smart-type-find`: DOM input/contenteditable resolver that does not focus or write.
+- `uia-find` now reports `value_pattern` / `value_readonly` so planners can prefer `uia-set-value` when available.
+
+### Route Preference
+
+1. `cdp_smart_type`: DOM value/event path for Chrome/Electron.
+2. `uia_set_value`: UIA ValuePattern path for native edit fields.
+3. `safe_type_guarded`: guarded click/focus/type fallback when target window and click point are known.
+
+### Verified
+
+- Headless Chrome type-plan test: `smart-plan --type-text hello --allow-cdp` recommended `cdp_smart_type` for a `Message` input and left the DOM input value empty, proving the planner is read-only.
+
+---
+
+## v1.3.3 — Smart action planner (2026-05-26)
+
+### Added
+
+- **`macro smart-plan --label <text>`**: read-only route planner that ranks CDP DOM, UIA Pattern, guarded UIA coordinate, and optional OCR fusion routes before any live action.
+- **`macro cdp-smart-find --text <label>`** / native `-Action cdp-smart-find`: read-only DOM resolver using the same scoring as `cdp-smart-click`, but with no scroll/focus/click.
+- `uia-find` now reports `invoke_pattern` and preferred `click_point` evidence so planners can choose no-mouse Pattern calls before coordinate fallbacks.
+
+### Verified
+
+- Headless Chrome plan test: `cdp-smart-find` and `smart-plan --allow-cdp` found the `Send` button, recommended `cdp_smart_click`, and left `window.clicked` at `0`.
+
+---
+
+## v1.3.2 — UIA ClickablePoint micro-refine (2026-05-26)
+
+### Improved
+
+- `ClickRefine uia-safe` now prefers Windows UIA native `ClickablePoint` before falling back to a clamped rect center.
+- `hit-test` now reports the refinement source (`clickable_point` or `rect_center`) plus `native_clickable` so agents can explain why a coordinate moved.
+- `macro hit-test` accepts `--click-inset N` for read-only tuning of tiny control click-point analysis.
+
+### Why
+
+For very small toolbar buttons, tabs, checkboxes, split buttons, and custom controls, the geometric center is not always the safest click point. UIA `ClickablePoint` is the OS/accessibility provider's own recommended point, so it better matches the "small part, precise click" goal while keeping the existing target-window guard.
+
+---
+
+## v1.3.1 — CDP smart DOM actions + low-lag preflight (2026-05-26)
+
+### Added
+
+- **`cdp-smart-click --text <label>`**: visible text / aria-label / title / placeholder / id / name / label 연결 정보를 점수화해서 DOM 클릭.
+- **`cdp-smart-type --label <field> --text <value>`**: label / placeholder 기반으로 input, textarea, contenteditable에 직접 입력.
+- `smart-click --allow-cdp` / `--cdp-page-match` / `--cdp-port` 로 Stage 0 CDP/DOM smart click opt-in.
+
+### Improved
+
+- 닫힌 CDP 포트는 wrapper 단계에서 TCP preflight로 빠르게 partial 처리해서 native helper child process 호출을 줄임.
+- CDP input은 React/controlled input 대응을 위해 native value setter + input/change event를 함께 사용.
+- `smart-click` 기본 경로에서는 CDP 자동 탐지를 끄고, 명시 옵션이 있을 때만 Stage 0을 시도해서 기본 클릭 반응 속도를 보호.
+
+### Verified
+
+- PowerShell parser: `cucp.ps1`, `cucp-native-helper.ps1` 통과.
+- Pester CDP 선별 테스트 11/11 통과.
+- 임시 headless Chrome에서 `cdp-smart-type` → `cdp-smart-click` → DOM 상태 검증 성공:
+  - input value: `hello`
+  - button click counter: `1`
+
+---
+
 ## v1.3.0 — Electron CDP integration (2026-05-25)
 
 ### 큰 틀 목표 달성
