@@ -7739,21 +7739,42 @@ function Invoke-MacroSafeType {
 
 function Test-CdpPortQuick {
   param([int]$Port = 9222, [int]$TimeoutMs = 120)
+  # v1.5.0 Phase 4: in-memory TTL cache (1초)
+  # 같은 wrapper invocation 안에서 cdp-detect 와 그 직후 cdp-* 매크로가
+  # 같은 port 를 재확인할 때 TCP socket 생성 비용 (~30-120ms) 회피.
+  if (-not $Script:CdpPortCache) { $Script:CdpPortCache = @{} }
+  $now = [DateTime]::UtcNow.Ticks
+  if ($Script:CdpPortCache.ContainsKey($Port)) {
+    $entry = $Script:CdpPortCache[$Port]
+    if ($entry.expires_ticks -gt $now) {
+      return [bool]$entry.open
+    } else {
+      [void]$Script:CdpPortCache.Remove($Port)
+    }
+  }
   $client = New-Object System.Net.Sockets.TcpClient
   $handle = $null
+  $isOpen = $false
   try {
     $iar = $client.BeginConnect("127.0.0.1", $Port, $null, $null)
     $handle = $iar.AsyncWaitHandle
-    if (-not $handle.WaitOne($TimeoutMs, $false)) { return $false }
-    $client.EndConnect($iar)
-    return [bool]$client.Connected
+    if (-not $handle.WaitOne($TimeoutMs, $false)) { $isOpen = $false }
+    else {
+      $client.EndConnect($iar)
+      $isOpen = [bool]$client.Connected
+    }
   } catch {
-    return $false
+    $isOpen = $false
   } finally {
     try { if ($handle) { $handle.Close() } } catch { }
     try { $client.Close() } catch { }
     try { $client.Dispose() } catch { }
   }
+  $Script:CdpPortCache[$Port] = @{
+    open = $isOpen
+    expires_ticks = [DateTime]::UtcNow.AddMilliseconds(1000).Ticks
+  }
+  return $isOpen
 }
 
 function New-CdpDomBridgePlan {
@@ -12827,6 +12848,7 @@ function Invoke-MacroPrecisionValidate {
 function Invoke-MacroBenchmark {
   param([string[]]$Rest)
   $itersStr = _Read-OptValue -Rest $Rest -Name "--iters"
+  $baselinePath = _Read-OptValue -Rest $Rest -Name "--baseline"
   $iters = 3
   if ($itersStr) { try { $iters = [int]$itersStr } catch { $iters = 3 } }
   if ($iters -lt 1)  { $iters = 1 }
@@ -12891,6 +12913,49 @@ function Invoke-MacroBenchmark {
   $rec = "investigate_helper_health"
   if ($passRate -ge 90.0)      { $rec = "all_within_slo" }
   elseif ($passRate -ge 60.0)  { $rec = "review_slow_targets" }
+  # v1.5.0: --baseline 비교 모드 (read-only, regression detection)
+  $baselineCompare = $null
+  if ($baselinePath -and (Test-Path -LiteralPath $baselinePath)) {
+    try {
+      $baseRaw = @(Get-Content -LiteralPath $baselinePath -Raw)
+      $base = $baseRaw -join "" | ConvertFrom-Json
+      $cmpRows = New-Object System.Collections.ArrayList
+      $regressed = 0
+      $improved  = 0
+      foreach ($cur in $results) {
+        $b = $base.results | Where-Object { $_.name -eq $cur.name } | Select-Object -First 1
+        if (-not $b) { continue }
+        $deltaP50 = $cur.p50_ms - [int]$b.p50_ms
+        $deltaP95 = $cur.p95_ms - [int]$b.p95_ms
+        $pctP50 = 0
+        if ([int]$b.p50_ms -gt 0) { $pctP50 = [Math]::Round((([double]$deltaP50) / [double]$b.p50_ms) * 100.0, 1) }
+        $verdict = "neutral"
+        if ($deltaP50 -le -10) { $verdict = "improved"; $improved++ }
+        elseif ($deltaP50 -ge 30) { $verdict = "regressed"; $regressed++ }
+        [void]$cmpRows.Add([ordered]@{
+          name = $cur.name
+          baseline_p50_ms = [int]$b.p50_ms
+          current_p50_ms  = $cur.p50_ms
+          delta_ms = $deltaP50
+          delta_pct = $pctP50
+          verdict = $verdict
+        })
+      }
+      $baselineCompare = [ordered]@{
+        baseline_path = $baselinePath
+        compared_targets = $cmpRows.Count
+        improved_count = $improved
+        regressed_count = $regressed
+        rows = @($cmpRows)
+      }
+    } catch {
+      $baselineCompare = [ordered]@{
+        baseline_path = $baselinePath
+        error = "baseline_load_failed"
+        detail = $_.Exception.Message
+      }
+    }
+  }
   $out = [ordered]@{
     schema = $Script:CucpV14Schema.Benchmark
     status = "ok"
@@ -12900,9 +12965,14 @@ function Invoke-MacroBenchmark {
     slo_pass_count    = $totalSlos
     slo_pass_rate_pct = $passRate
     recommendation    = $rec
+    baseline_compare  = $baselineCompare
   }
   if ($Brief) {
-    [Console]::Out.WriteLine("ok benchmark targets=$($targets.Count) iters=$iters slo_pass=$totalSlos/$($targets.Count) ($passRate%)")
+    if ($baselineCompare -and -not $baselineCompare.error) {
+      [Console]::Out.WriteLine("ok benchmark targets=$($targets.Count) iters=$iters slo_pass=$totalSlos/$($targets.Count) ($passRate%) improved=$($baselineCompare.improved_count) regressed=$($baselineCompare.regressed_count)")
+    } else {
+      [Console]::Out.WriteLine("ok benchmark targets=$($targets.Count) iters=$iters slo_pass=$totalSlos/$($targets.Count) ($passRate%)")
+    }
   } else {
     [Console]::Out.WriteLine(($out | ConvertTo-Json -Depth 10))
   }

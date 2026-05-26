@@ -2,7 +2,9 @@
 
 Updated: 2026-05-27
 
-Current progress estimate: **100%** — v1.4.0 에서 6 missing items 모두 구현 완료.
+Current progress estimate: **100%** (functional 6 missing items) +
+**v1.5.0 perf interim**. Next sprint: helper persistent server (named pipe IPC)
+가 진짜 8-20x 가속을 single-shot 에서도 측정 가능하게 만드는 핵심.
 
 ## v1.4.0 — 6 missing items 구현 결과
 
@@ -63,6 +65,12 @@ Current progress estimate: **100%** — v1.4.0 에서 6 missing items 모두 구
 
 ## v1.5+ 후보 (현재 100%, 추가 확장은 옵션)
 
+- **Helper persistent server (named pipe IPC)** — single-shot wrapper invocation
+  에서도 8-20x 가속 측정 가능하게. v1.5.0 의 hot cache 가 cascade chain 한정인
+  이유를 정공법으로 해결.
+- **CDP WebSocket connection 재사용** — helper server 안에서만 의미 있음.
+- **smart-click history fast-track** — 최근 3회 같은 strategy + score≥80 이면
+  cascade 첫 stage 부터 시작하지 말고 그 stage 부터 skip.
 - DXGI capture (game/full-screen surface) — 게임 / 풀스크린 영역 capture 우회.
 - Auto-mask region — `screenshot-diff` 가 노이즈가 큰 영역(시계/배지/캐럿 등) 자동 식별.
 - Multi-monitor coord-anchor — display layout 변화 시 anchor 자동 재 anchor.

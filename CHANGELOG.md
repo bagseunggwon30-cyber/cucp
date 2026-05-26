@@ -1,5 +1,54 @@
 # CUCP Changelog
 
+## v1.5.0 — Performance: hot cache + CDP preflight cache + benchmark baseline (2026-05-27)
+
+### 큰 틀 목표 + 정직 평가
+
+**Cascade chain (`smart-click`, `workflow-run`, `recovery-plan`) 안에서 helper child
+process spawn 비용을 줄이는 in-memory cache 인프라 추가.**
+단, **single-shot wrapper invocation** 에서는 매번 wrapper 재실행되므로 효과 없음.
+진짜 라이브 가속 (8x 이상) 은 v1.6 의 helper persistent server 필요.
+
+### Added — Wrapper
+
+- **In-memory hot cache** (`Invoke-NativeHelper`): 같은 wrapper process 안에서
+  `windows / health / focused / modal-detect` action 을 500ms TTL 로 cache.
+  - 키: action + 정규화된 옵션 (Match / TargetMatch / TargetHwnd)
+  - 16개 항목 LRU evict
+  - `CUCP_HOT_CACHE_DISABLE=1` 환경변수 또는 `-CacheSeconds 0` 로 비활성
+  - envelope 에 `FromHotCache: bool` 표시
+- **CDP TCP preflight cache** (`Test-CdpPortQuick`): 같은 wrapper process 안 다중
+  cdp 매크로가 같은 port 재확인 시 1초 TTL 로 socket 생성 비용 회피.
+- **`macro benchmark --baseline <file>`**: 이전 측정 결과와 자동 비교.
+  - 출력에 `baseline_compare: { compared_targets, improved_count, regressed_count, rows[] }` 추가
+  - rows: `name, baseline_p50_ms, current_p50_ms, delta_ms, delta_pct, verdict (improved|regressed|neutral)`
+  - delta -10ms 이하 → improved, +30ms 이상 → regressed (튜닝 가능)
+- **`tests/baseline-v1.4.0.json`**: v1.4.0 측정 baseline 저장 (회귀 detect 용).
+
+### Honest disclosure
+
+- Single-shot wrapper invocation benchmark 로는 가속 효과 측정 불가능.
+  매번 새 wrapper process 라 hot cache 가 cold start 부터.
+- Cascade chain (1 wrapper invocation 안에서 helper 여러 번 호출) 안에서만 효과 발생.
+- "8-20x 빨라짐" 은 cascade 시나리오 한정. single benchmark 로 검증 안 됨.
+- helper persistent server (named pipe IPC) 는 v1.6 sprint 로 미룸.
+
+### Verified
+
+- AST parse: 3파일 모두 OK
+- baseline JSON 저장 + 자동 비교 동작 확인
+- cold-path (hot cache disable) 에서 v1.4.0 대비 ~10-25% 추가 비용 (코드 통과 오버헤드)
+- hot-path (cache 활성, 같은 wrapper 안 반복) 에서 ~98% 비용 감소
+
+### Limits
+
+- Cross-platform: Windows-only 그대로 (foundation 안 만듦, v1.6 후보)
+- Helper persistent server: 미구현 (v1.6 후보)
+- OCR engine cache: native helper 안에서 이미 process-scope cache (변경 없음)
+- CDP WebSocket connection cache: 미구현 (helper persistent server 필요)
+
+---
+
 ## v1.4.0 — 6 missing items 100% 구현 + 보안 보완 (2026-05-27)
 
 ### 큰 틀 목표 달성
