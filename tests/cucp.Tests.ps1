@@ -2055,7 +2055,7 @@ Describe "cucp v1.4.0 - cdp-deep-find" {
     $r = _CapturePs1 -ArgList @("-Quiet","macro","cdp-deep-find","--text","Send","--port","9999","--json-only")
     $r.ExitCode | Should Be 2
     $obj = $null
-    try { $obj = $r.StdOut | ConvertFrom-Json } catch { }
+    try { $obj = $r.Raw | ConvertFrom-Json } catch { }
     $obj.schema | Should Be "cucp.cdp-deep-find/v1"
     $obj.status | Should Be "partial"
     $obj.reason | Should Be "cdp_port_closed"
@@ -2079,7 +2079,7 @@ Describe "cucp v1.4.0 - modal-detect (read-only)" {
     $r = _CapturePs1 -ArgList @("-Quiet","macro","modal-detect","--json-only")
     $r.ExitCode | Should Be 0
     $obj = $null
-    try { $obj = $r.StdOut | ConvertFrom-Json } catch { }
+    try { $obj = $r.Raw | ConvertFrom-Json } catch { }
     $obj.schema | Should Be "cucp.modal-detect/v1"
     $obj.status | Should Be "ok"
   }
@@ -2090,7 +2090,7 @@ Describe "cucp v1.4.0 - recovery-plan (read-only)" {
     $r = _CapturePs1 -ArgList @("-Quiet","macro","recovery-plan","--json-only")
     $r.ExitCode | Should Be 0
     $obj = $null
-    try { $obj = $r.StdOut | ConvertFrom-Json } catch { }
+    try { $obj = $r.Raw | ConvertFrom-Json } catch { }
     $obj.schema | Should Be "cucp.recovery-plan/v1"
     $obj.candidate_count | Should BeGreaterThan 0
   }
@@ -2101,7 +2101,7 @@ Describe "cucp v1.4.0 - recovery-run safety gate" {
     $r = _CapturePs1 -ArgList @("-Quiet","macro","recovery-run","--dry-run","--json-only")
     $r.ExitCode | Should Be 0
     $obj = $null
-    try { $obj = $r.StdOut | ConvertFrom-Json } catch { }
+    try { $obj = $r.Raw | ConvertFrom-Json } catch { }
     $obj.schema | Should Be "cucp.recovery-run/v1"
     $obj.status | Should Be "ready"
     $obj.dry_run | Should Be $true
@@ -2121,7 +2121,7 @@ Describe "cucp v1.4.0 - precision-validate (read-only)" {
     $r = _CapturePs1 -ArgList @("-Quiet","macro","precision-validate","--x","100","--y","100","--samples","2","--json-only")
     $r.ExitCode | Should Be 0
     $obj = $null
-    try { $obj = $r.StdOut | ConvertFrom-Json } catch { }
+    try { $obj = $r.Raw | ConvertFrom-Json } catch { }
     $obj.schema | Should Be "cucp.precision-validate/v1"
     $obj.status | Should Be "ok"
     $obj.input.samples | Should Be 2
@@ -2133,7 +2133,7 @@ Describe "cucp v1.4.0 - benchmark (read-only)" {
     $r = _CapturePs1 -ArgList @("-Quiet","macro","benchmark","--iters","1","--json-only")
     $r.ExitCode | Should Be 0
     $obj = $null
-    try { $obj = $r.StdOut | ConvertFrom-Json } catch { }
+    try { $obj = $r.Raw | ConvertFrom-Json } catch { }
     $obj.schema | Should Be "cucp.benchmark/v1"
     $obj.status | Should Be "ok"
     $obj.target_count | Should BeGreaterThan 0
@@ -2146,7 +2146,7 @@ Describe "cucp v1.4.0 - release-notes (read-only) + secret redaction" {
     $r = _CapturePs1 -ArgList @("-Quiet","macro","release-notes","--json-only")
     $r.ExitCode | Should Be 0
     $obj = $null
-    try { $obj = $r.StdOut | ConvertFrom-Json } catch { }
+    try { $obj = $r.Raw | ConvertFrom-Json } catch { }
     $obj.schema | Should Be "cucp.release-notes/v1"
     $obj.status | Should Be "ok"
     $obj.note_count | Should BeGreaterThan 0
