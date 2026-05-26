@@ -234,6 +234,52 @@ function Invoke-NativeHelper {
       ElapsedMs = 0
     }
   }
+  # ==========================================================================
+  # v1.5.0 Phase 1: in-memory hot cache (TTL 500ms)
+  # 같은 read-only action 을 짧은 시간 내 반복 호출 시 child process spawn 우회.
+  # 적용 대상: -Action windows / health / focused / modal-detect 만.
+  # 키: action + 주요 옵션 (Match, TargetMatch, TargetHwnd) 정규화.
+  # `-CacheSeconds 0` 또는 환경 변수 `CUCP_HOT_CACHE_DISABLE=1` 시 비활성.
+  # ==========================================================================
+  $hotKey = $null
+  $hotEligible = $false
+  if (-not $env:CUCP_HOT_CACHE_DISABLE -and $Script:CacheSeconds -gt 0) {
+    $hotAction = $null
+    for ($i = 0; $i -lt $ArgList.Count - 1; $i++) {
+      if ($ArgList[$i] -eq "-Action") { $hotAction = $ArgList[$i+1]; break }
+    }
+    $hotEligibleActions = @("windows","health","focused","modal-detect")
+    if ($hotAction -and ($hotEligibleActions -contains $hotAction)) {
+      $hotEligible = $true
+      $hotKey = "$hotAction|"
+      foreach ($optName in @("-Match","-TargetMatch","-TargetHwnd")) {
+        for ($j = 0; $j -lt $ArgList.Count - 1; $j++) {
+          if ($ArgList[$j] -eq $optName) { $hotKey += "$optName=$($ArgList[$j+1])|"; break }
+        }
+      }
+    }
+  }
+  if (-not $Script:HotCache) { $Script:HotCache = @{} }
+  if (-not $Script:HotCacheStats) { $Script:HotCacheStats = @{ hits = 0; misses = 0; evictions = 0 } }
+  if ($hotEligible -and $hotKey -and $Script:HotCache.ContainsKey($hotKey)) {
+    $entry = $Script:HotCache[$hotKey]
+    $nowTicks = [DateTime]::UtcNow.Ticks
+    if ($entry.expires_ticks -gt $nowTicks) {
+      $Script:HotCacheStats.hits++
+      return [pscustomobject]@{
+        ExitCode = $entry.exit_code
+        Json = $entry.json
+        Raw = $entry.raw
+        Err = $null
+        ElapsedMs = 0
+        FromHotCache = $true
+      }
+    } else {
+      $Script:HotCacheStats.evictions++
+      [void]$Script:HotCache.Remove($hotKey)
+    }
+  }
+  if ($hotEligible) { $Script:HotCacheStats.misses++ }
   if ($TimeoutMs -le 0) { $TimeoutMs = $Script:InvokeTimeoutMs }
   $sw = [System.Diagnostics.Stopwatch]::StartNew()
   $stdoutFile = Join-Path $Script:CacheDir ("native-" + [guid]::NewGuid().ToString("N") + ".json")
@@ -292,12 +338,32 @@ function Invoke-NativeHelper {
         "error"   { $exitCode = 1 }
       }
     }
+    # v1.5.0 Phase 1: hot cache write (정상 응답만, ok+JSON 있을 때, eligible action 만)
+    if ($hotEligible -and $hotKey -and $exitCode -eq 0 -and $json) {
+      try {
+        $ttlMs = 500
+        $expiresTicks = [DateTime]::UtcNow.AddMilliseconds($ttlMs).Ticks
+        $Script:HotCache[$hotKey] = @{
+          exit_code = [int]$exitCode
+          json = $json
+          raw = $raw
+          expires_ticks = $expiresTicks
+        }
+        # 메모리 보호: 캐시 항목 16개 초과 시 가장 오래된 것 evict
+        if ($Script:HotCache.Count -gt 16) {
+          $oldest = $Script:HotCache.GetEnumerator() | Sort-Object { $_.Value.expires_ticks } | Select-Object -First 1
+          [void]$Script:HotCache.Remove($oldest.Key)
+          $Script:HotCacheStats.evictions++
+        }
+      } catch { }
+    }
     return [pscustomobject]@{
       ExitCode = $exitCode
       Json = $json
       Raw = $raw
       Err = $err
       ElapsedMs = [int]$sw.Elapsed.TotalMilliseconds
+      FromHotCache = $false
     }
   } catch {
     $sw.Stop()
