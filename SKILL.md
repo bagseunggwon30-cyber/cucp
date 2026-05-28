@@ -65,6 +65,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File C:\Users\K\.codex\skills\cuc
 & <wrapper> macro smart-plan --label "Save" --match "Kiro" --precision-points  # planner can recommend micro-refined click-point route
 & <wrapper> macro smart-plan --label "Message" --type-text "hello" --allow-cdp  # read-only input planner
 & <wrapper> macro app-profile --match "Chrome" --label "Send" --label "Subject" --auto-probe  # read-only app profile and capability probes
+& <wrapper> macro task-card open                # XG5000/XP-Builder devices/requirements card
+& <wrapper> macro task-card show                # read current task-card JSON for planning
 & <wrapper> macro workflow-plan --step "macro hit-test --x 1200 --y 720 --fast" --step "macro form-plan --field Message=hello"  # read-only multi-step workflow plan
 & <wrapper> macro workflow-run --step "macro hit-test --x 1200 --y 720 --fast" --step "macro windows"  # run read-only workflow without live control
 & <wrapper> macro workflow-run --observe-after-step --step "macro hit-test --x 1200 --y 720 --fast"  # execute read-only step, then capture a cheap window observation

@@ -3,8 +3,15 @@
 Updated: 2026-05-27
 
 Current progress estimate: **100%** (functional 6 missing items) +
-**v1.5.0 perf interim**. Next sprint: helper persistent server (named pipe IPC)
+**v1.5.1 XG5000 task-card bridge**. Next sprint: helper persistent server (named pipe IPC)
 가 진짜 8-20x 가속을 single-shot 에서도 측정 가능하게 만드는 핵심.
+
+## v1.5.1 — XG5000 / XP-Builder context bridge
+
+- Added `macro task-card open|show|ensure|save|path|clear` for device, address range, requirement, and safety context.
+- Added `scripts/cucp-task-card.ps1`, a small WinForms card that writes `%TEMP%\computer-use-control-plane\task-card\current-task-card.json`.
+- `app-profile` now auto-loads `task_card` for PLC/SCADA-like windows such as XG5000, XP-Builder, CIMON, XGT, PLC, and Modbus tools.
+- Added `references/xg5000-task-card.md` and a separate Codex skill under `skills/xg5000-cucp-assistant/`.
 
 ## v1.4.0 — 6 missing items 구현 결과
 
@@ -58,7 +65,7 @@ Current progress estimate: **100%** (functional 6 missing items) +
 ## Done — Verification
 
 - AST parse: cucp.ps1 / cucp-native-helper.ps1 / cucp.Tests.ps1 모두 OK.
-- Pester: 학원본 베이스라인 177/177 통과 + v1.4.0 신규 14건 추가.
+- Pester: 설치 repo 기준 2026-05-27 회귀 테스트 190/190 통과.
 - Sanity check 라이브: cdp-deep-find / modal-detect / recovery-plan / recovery-run --dry-run /
   precision-validate / benchmark / release-notes 모두 의도된 envelope + exit code 반환.
 - Secret redaction: 합성 CHANGELOG 의 PAT / sk- / AKIA / Bearer 4종 모두 [REDACTED:*] 치환 검증.
