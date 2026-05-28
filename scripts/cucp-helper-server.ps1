@@ -1,5 +1,5 @@
 # =============================================================================
-# CUCP Helper Persistent Server (v1.6.0)
+# CUCP Helper Persistent Server (v2.0.0)
 # =============================================================================
 # 동기:
 #   기존 cucp-native-helper.ps1 은 매 호출마다 child PowerShell 프로세스를 생성
@@ -536,7 +536,9 @@ $lockData = @{
   pid = $PID
   pipe_name = $PipeName
   started_at = $Script:_StartedAt.ToString("o")
-  helper_version = "1.7.0"
+  helper_version = "2.0.0"
+  owner_user = ([Environment]::UserName)
+  owner_sid = (try { [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value } catch { $null })
 }
 try {
   $lockJson = $lockData | ConvertTo-Json -Compress
@@ -580,6 +582,19 @@ while ($running) {
       [System.IO.Pipes.PipeTransmissionMode]::Byte,
       [System.IO.Pipes.PipeOptions]::None
     )
+    # v2.0.0 — Multi-user 격리: pipe 에 owner-only ACL 적용. 같은 머신에서 다른 user
+    # session 이 같은 pipe 를 sniff / write 못하게 함. 실패해도 server 자체는 계속
+    # (PowerShell 5.x 가 일부 환경에서 GetAccessControl 미지원) — fail-soft.
+    try {
+      $sid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
+      $sec = New-Object System.IO.Pipes.PipeSecurity
+      $rule = New-Object System.IO.Pipes.PipeAccessRule($sid, [System.IO.Pipes.PipeAccessRights]::FullControl, [System.Security.AccessControl.AccessControlType]::Allow)
+      $sec.AddAccessRule($rule)
+      # pipe.SetAccessControl 은 .NET 4.x Windows PowerShell 에서 지원 (Mono / .NET Core 일부 미지원)
+      $pipe.SetAccessControl($sec)
+    } catch {
+      _Log "PipeSecurity ACL failed (continuing): $($_.Exception.Message)"
+    }
     # async wait + idle timeout 체크 (BeginWaitForConnection async, idle 시 cancel)
     $waitAr = $pipe.BeginWaitForConnection($null, $null)
     $idleExit = $false

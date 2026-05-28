@@ -1,5 +1,113 @@
 # CUCP Changelog
 
+## v2.1.0 — Option B + Reliability + Enterprise (2026-05-29)
+
+### 큰 틀 목표
+
+`cucp-v2-integration` spec 의 Phase 2 → Phase 4 에 해당하는 wrapper-side 구현을
+하나의 sprint 로 통합. 라이브 환경 의존 작업은 cassette runner script 로 사용자가
+직접 실행할 수 있게 준비. 본 sprint 는 **본체 업그레이드용** + GitHub push 둘 다.
+
+### Added — v1.8.0 Option B Layer 통합 (Phase 2)
+
+- **`Get-CucpVersionReport`**: skill (wrapper) + cli (Node backend) + helper-server
+  3 layer 의 SemVer 를 `cucp.version/v1` envelope 으로 통합. helper_mode (`persistent_server`
+  / `child_only`) 와 surface (`wrapper+cli` / `wrapper_only`) 도 노출. 어느 layer 가
+  누락돼도 status="partial" + recoverable_errors[] 로 graceful.
+- **`$Script:SkillVersion = "2.1.0"`**: wrapper version single source of truth.
+- **`Invoke-MacroVersion`** + dispatcher 의 `version` 매크로 + main entry 의
+  `cucp version` 가로채기: cli backend 로 forward 하기 전에 wrapper 통합 envelope 직접 emit.
+
+### Added — v1.9.0 Reliability (Phase 3)
+
+- **Cross-platform honest stub** (`_Make-PlatformStubEnvelope`, `_Assert-PlatformOrStub`):
+  `$Script:IsWindowsPlatform` / `$Script:PlatformName` 자동 감지. 비Windows live action 은
+  `exit 3, platform_unsupported`, read-only 는 `status="honest_stub"` envelope. 단,
+  본체 (Windows 10/11) 에서 schema 검증만 수행 — 실제 macOS/Linux 라이브 검증은 별도 환경 필요.
+- **Recorder + Replay** (`Recorder-Start`, `Recorder-Append`, `Recorder-Stop`,
+  `Invoke-MacroRecorder`):
+  - `macro recorder start [--name X]` / `stop` / `list` / `show --name X` /
+    `replay --name X [--dry-run] [--continue-on-error]`.
+  - session JSON 위치: `%TEMP%\computer-use-control-plane\recorder\<name>.json`.
+  - replay 의 라이브 재실행도 wrapper `-AllowLiveControl` 게이트 그대로 enforce
+    (P7 invariant 보존).
+  - schema: `cucp.recorder/v1`, `cucp.recorder-replay/v1`.
+
+### Added — v2.0.0 Enterprise (Phase 4)
+
+- **`macro audit-summary [--since-minutes N]`** (`Invoke-MacroAuditSummary`):
+  trajectory*.ndjson 파일들을 시간대 / 매크로 / exit_code 별 집계. envelope schema
+  `cucp.audit-summary/v1`. 빈 trajectory 는 status="empty" graceful.
+- **`macro policy-check --action <macro> [--policy <file>]`** (`Invoke-MacroPolicyCheck`):
+  policy JSON (rules[].match regex + decision: allow|deny|require_confirm) 평가. 정책 파일
+  없으면 default rule (live macro = require_confirm). schema `cucp.policy/v1`.
+  `decision=deny` → `exit 3`.
+- **Vision LLM token budget gate** (`_Vision-CheckBudget`, `_Vision-RecordCall`):
+  `vision-find` / `vision-click` 진입에 hook. 환경변수 `CUCP_VISION_MAX_CALLS` /
+  `CUCP_VISION_MAX_TOKENS` 로 한도 설정. 초과 시 `exit 3, vision_budget_exceeded`.
+  세션 누적은 한 wrapper invocation scope.
+- **Helper-server PipeSecurity owner-only ACL**: `cucp-helper-server.ps1` 의
+  `NamedPipeServerStream` 생성 직후 `PipeSecurity` 로 현재 user SID 만 FullControl.
+  실패 시 fail-soft (server 자체는 계속).
+- **lock 파일에 `owner_user` / `owner_sid`**: 같은 머신 다른 user session 의 helper
+  server 와 격리. wrapper 의 `_Is-StaleLock` / `_Try-Delete-Lock` 이 다른 user 의 lock
+  은 stale 처리하지 않고 무시 (자기 user 만 정리).
+- **helper_server 헤더 v2.0.0**: helper_version "1.7.0" → "2.0.0".
+
+### Added — Live cassette runner
+
+- **`references\live-cassette-runner.ps1`** (interactive runner):
+  - Notepad / Kiro / Chrome / XG5000 4환경 cassette 한 번에 보존.
+  - 결과: `live-verify\<env>\*.json` (`cucp.live-verify/v1` schema).
+  - 사용법: `.\references\live-cassette-runner.ps1 -Env all` (또는 `notepad` / `kiro` / `chrome` / `xg5000`).
+  - DryRun 모드 지원 (`-DryRun` 으로 명령만 출력, 실행 안 함).
+  - mouse-verify / cdp-prosemirror-insert / safe-type-ime 등 라이브 매크로 호출 자동화.
+
+### Improved
+
+- **dispatcher safety-block 보강**: `directSafetyLiveMacros` 화이트리스트에 v1.7.0+
+  매크로 누락분 추가 (`mouse-verify`, `cdp-prosemirror-insert`, `ime-paste`,
+  `safe-type-ime`, `recovery-run`). sensitive 분류기가 이 매크로들을 정상적으로 가도록.
+
+### Verified
+
+- AST parse 3파일 (cucp.ps1 104k tokens, cucp-native-helper.ps1 26k tokens,
+  cucp-helper-server.ps1 4.4k tokens) 모두 OK.
+- Pester 회귀: 190 / 190 — 단, **timing-flaky 1건** (`InvokeTimeoutMs=1000` 또는
+  `< 3초` budget 의 외부 동기화 의존 테스트가 1100ms~1500ms 살짝 초과). 동일 변경 없이
+  반복 실행 시 fail 위치가 매번 바뀜 → **코드 회귀 아님**. v1.6.0 baseline 부터 동일 양상.
+- `cucp version` envelope 측정: skill v2.1.0 + cli v1.0.0 + helper_server v2.0.0,
+  surface=wrapper+cli, helper_mode=child_only, status=ok.
+- safety gate: vision budget / mouse-verify / cdp-prosemirror-insert / recovery-run
+  모두 `-AllowLiveControl` 없을 때 exit 3.
+
+### Honest disclosure
+
+- **PipeSecurity ACL 은 fail-soft**: PowerShell 5.x 일부 환경에서 `pipe.SetAccessControl`
+  미지원 가능. 실패 시 default ACL (대부분 owner+admin) 로 동작 — multi-user
+  격리는 lock owner_user 검사 layer 가 보강.
+- **multi-user 시나리오 검증은 모킹만**: 실제 다른 user session 에서 같은 머신 동시 사용
+  검증은 본 sprint 범위 외. lock 파일 격리는 `owner_user` 비교로 방어.
+- **vision budget 은 단일 wrapper invocation scope**: 매 wrapper 호출마다 카운터 리셋.
+  진짜 cross-invocation budget tracking 은 별도 sprint (예: NDJSON state file).
+- **cassette runner 는 사용자 라이브 환경 의존**: Notepad / Kiro / Chrome / XG5000
+  실행 상태에 따라 결과 schema 가 달라짐. 본 코드는 capture pipeline + cassette schema
+  보장만, 실제 cassette 데이터 보존은 사용자 1회 실행 필요.
+- **cross-platform stub 은 schema 검증만**: 본 sprint 안에서 macOS / Linux 본체에서 실
+  실행 검증 안 함. PowerShell Core 6+ 에서 `$IsLinux` 변수 fallback 설계만.
+- **policy-check 의 default rule 은 보수적**: live macro = require_confirm. 사용자가
+  policy 파일을 명시 제공하지 않으면 모든 live macro 가 require_confirm 으로 표기됨
+  (실제 차단은 wrapper -AllowLiveControl 게이트가 1차로 처리).
+
+### Limits
+
+- recorder 는 trajectory hook 자동 연동 안 함 (ts/macro/args 명시 push 만). 자동 캡처는
+  별도 sprint.
+- cassette runner 는 interactive prompt 기반. 자동 CI 통합 안 함.
+- policy 파일 schema 정의 (`references/policy-schema.md`) 는 별도 문서 필요.
+
+---
+
 ## v1.7.0 — Server-side cache 확장 + Wrapper daemon + ProseMirror live (2026-05-29)
 
 ### 큰 틀 목표

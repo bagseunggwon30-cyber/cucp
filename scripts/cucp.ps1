@@ -171,6 +171,32 @@ $Script:CacheDir = Join-Path $Script:AuditDir "wrapper-cache"
 $Script:WrapperLog = Join-Path $Script:AuditDir "cucp-wrapper.log"
 $Script:InvokeTimeoutMs = [Math]::Max(1000, $InvokeTimeoutMs)
 
+# ----- skill version --------------------------------------------------------
+# Single source of truth for skill (wrapper) version. CHANGELOG/README 와 동기화.
+# Get-CucpVersionReport 가 이 상수 + cli/package.json + helper-server 헤더를 합쳐
+# `cucp.version/v1` envelope 으로 통합 출력.
+$Script:SkillVersion = "2.1.0"
+
+# ----- platform detection (v1.9.0 honest stub) -----------------------------
+# CUCP 의 actuation / OCR / UIA 는 Windows 에 종속 (Windows.Media.Ocr, P/Invoke,
+# UIAutomationClient). non-Windows 에서 호출되면 honest_stub envelope 으로 응답하고
+# live action 은 platform_unsupported 로 거부. PowerShell Core (pwsh) 6+ 의
+# $IsWindows / $IsLinux / $IsMacOS 변수를 사용. PowerShell 5 (Windows-only) 에서는
+# 이 변수가 없을 수 있으므로 [Environment]::OSVersion.Platform 으로 fallback.
+$Script:IsWindowsPlatform = $true
+try {
+  if ($null -ne (Get-Variable -Name IsWindows -ErrorAction SilentlyContinue)) {
+    $Script:IsWindowsPlatform = [bool]$IsWindows
+  } else {
+    $plat = [Environment]::OSVersion.Platform
+    $Script:IsWindowsPlatform = ($plat -eq [System.PlatformID]::Win32NT)
+  }
+} catch { $Script:IsWindowsPlatform = $true }
+$Script:PlatformName = if ($Script:IsWindowsPlatform) { "windows" }
+  elseif ($null -ne (Get-Variable -Name IsMacOS -ErrorAction SilentlyContinue) -and $IsMacOS) { "macos" }
+  elseif ($null -ne (Get-Variable -Name IsLinux -ErrorAction SilentlyContinue) -and $IsLinux) { "linux" }
+  else { "unknown" }
+
 # ----- logging --------------------------------------------------------------
 function Write-WrapperLog {
   param([string]$Message)
@@ -250,6 +276,15 @@ function _Read-LockSafely {
 function _Is-StaleLock {
   param($Lock)
   if (-not $Lock) { return $true }
+  # v2.0.0 — multi-user 격리: 다른 user 의 lock 은 stale 처리하지 않고 무시.
+  # wrapper 가 자기 user 의 lock 만 정리하도록. owner_user 가 없으면 (legacy) 검사 skip.
+  try {
+    $myUser = [Environment]::UserName
+    if ($Lock.owner_user -and "$($Lock.owner_user)" -ne $myUser) {
+      # 남의 user 의 lock — stale 아니지만 우리는 사용 안 함. 호출자가 lock 을 무시할 수 있도록 stale 로 처리 (delete 안 함).
+      return $true
+    }
+  } catch { }
   # 1. PID alive 검증
   try {
     $proc = Get-Process -Id ([int]$Lock.pid) -ErrorAction SilentlyContinue
@@ -270,9 +305,16 @@ function _Is-StaleLock {
 }
 
 function _Try-Delete-Lock {
-  if (Test-Path -LiteralPath $Script:HelperLockPath) {
-    try { Remove-Item -LiteralPath $Script:HelperLockPath -Force -ErrorAction SilentlyContinue } catch { }
-  }
+  # v2.0.0 — 자기 user 의 lock 만 삭제. 남의 lock 은 절대 삭제 안 함.
+  if (-not (Test-Path -LiteralPath $Script:HelperLockPath)) { return }
+  try {
+    $lock = _Read-LockSafely
+    if ($lock -and $lock.owner_user) {
+      $myUser = [Environment]::UserName
+      if ("$($lock.owner_user)" -ne $myUser) { return }
+    }
+    Remove-Item -LiteralPath $Script:HelperLockPath -Force -ErrorAction SilentlyContinue
+  } catch { }
 }
 
 function Get-HelperServerStatus {
@@ -446,6 +488,513 @@ function Stop-HelperServer {
     stopped_pid = $oldPid
     forced = [bool]$Force
   }
+}
+
+# ============================================================================
+# v1.8.0 — Get-CucpVersionReport (Option B Layer 통합 surface)
+# ============================================================================
+# CUCP 의 entry point 는 cucp.ps1 단독. 그 아래 layer 가 셋:
+#   - skill (wrapper, $Script:SkillVersion) — 매크로 + helper-server lifecycle
+#   - cli (Node backend, package.json) — 저수준 control-plane (read-only 기본)
+#   - helper-server (cucp-helper-server.ps1 헤더) — long-running named pipe
+# 이 함수는 셋의 버전 + helper_mode + envelope 일관 schema 로 통합.
+# 어느 layer 가 누락돼도 status="partial" + recoverable_errors[] 로 graceful.
+# ============================================================================
+
+function _Read-CliVersion {
+  # cli backend 의 package.json 에서 version 읽기. 없으면 $null.
+  if (-not $Script:CliPath) { return @{ version = $null; package_path = $null; error = "cli_path_unresolved" } }
+  $cliDir = Split-Path -Parent $Script:CliPath
+  # cli.mjs 위치 기준 package.json 후보: ../package.json (대부분), ./package.json
+  $candidates = @(
+    (Join-Path $cliDir "..\package.json"),
+    (Join-Path $cliDir "package.json")
+  )
+  foreach ($p in $candidates) {
+    $resolved = [System.IO.Path]::GetFullPath($p)
+    if (Test-Path -LiteralPath $resolved) {
+      try {
+        $pkg = Get-Content -LiteralPath $resolved -Raw -Encoding UTF8 | ConvertFrom-Json
+        return @{ version = "$($pkg.version)"; package_path = $resolved; error = $null }
+      } catch {
+        return @{ version = $null; package_path = $resolved; error = "package_json_parse_failed" }
+      }
+    }
+  }
+  return @{ version = $null; package_path = $null; error = "package_json_not_found" }
+}
+
+function _Read-HelperServerVersion {
+  # cucp-helper-server.ps1 헤더 주석 또는 helper_version 라인에서 SemVer 추출.
+  if (-not $Script:HelperServerScript -or -not (Test-Path -LiteralPath $Script:HelperServerScript)) {
+    return @{ version = $null; error = "helper_server_script_missing" }
+  }
+  try {
+    $head = Get-Content -LiteralPath $Script:HelperServerScript -TotalCount 600 -Encoding UTF8 -ErrorAction SilentlyContinue
+    if (-not $head) { return @{ version = $null; error = "helper_server_empty" } }
+    foreach ($line in $head) {
+      # 우선순위 1: helper_version = "X.Y.Z" 라인 (단일 source of truth)
+      if ($line -match 'helper_version\s*=\s*"(\d+\.\d+\.\d+)"') {
+        return @{ version = $Matches[1]; error = $null }
+      }
+    }
+    foreach ($line in $head) {
+      # 우선순위 2: 헤더 주석 "# CUCP Helper Persistent Server (vX.Y.Z)"
+      if ($line -match 'Helper.*\(v(\d+\.\d+\.\d+)\)') {
+        return @{ version = $Matches[1]; error = $null }
+      }
+    }
+    return @{ version = $null; error = "helper_server_version_not_found" }
+  } catch {
+    return @{ version = $null; error = "helper_server_read_failed" }
+  }
+}
+
+function Get-CucpVersionReport {
+  # 출력 envelope schema = "cucp.version/v1"
+  # surface = "wrapper_only" (cucp.ps1 단독 entry point), "wrapper+cli" (cli backend 동반)
+  # helper_mode = "persistent_server" (lock alive) | "child_only" (lock 부재/stale)
+  # status = "ok" | "partial" (layer 누락 시)
+  $errs = New-Object System.Collections.ArrayList
+  $cli = _Read-CliVersion
+  if ($cli.error) {
+    [void]$errs.Add(@{ code = $cli.error; layer = "cli"; recommended_action = "Set CUCP_CLI_PATH or run wrapper-only mode" })
+  }
+  $hs = _Read-HelperServerVersion
+  if ($hs.error) {
+    [void]$errs.Add(@{ code = $hs.error; layer = "helper_server"; recommended_action = "Verify scripts/cucp-helper-server.ps1 헤더의 helper_version 표기" })
+  }
+  $lock = _Read-LockSafely
+  $helperMode = "child_only"
+  if ($lock -and -not (_Is-StaleLock -Lock $lock)) { $helperMode = "persistent_server" }
+  $surface = "wrapper_only"
+  if ($cli.version) { $surface = "wrapper+cli" }
+  $status = "ok"
+  if ($errs.Count -gt 0) { $status = "partial" }
+  return [pscustomobject]@{
+    schema = "cucp.version/v1"
+    status = $status
+    surface = $surface
+    helper_mode = $helperMode
+    versions = @{
+      skill = $Script:SkillVersion
+      cli = $cli.version
+      helper_server = $hs.version
+    }
+    sources = @{
+      skill = "scripts/cucp.ps1::Script:SkillVersion"
+      cli = $cli.package_path
+      helper_server = $Script:HelperServerScript
+    }
+    recoverable_errors = @($errs)
+    generated_at = (Get-Date).ToString("yyyy-MM-ddTHH:mm:ss.fffK")
+  }
+}
+
+function Invoke-MacroVersion {
+  # macro version [--json-only]
+  # 사용처:
+  #   - cucp version           (사람용 brief 출력)
+  #   - cucp macro version     (envelope JSON)
+  #   - cucp macro version --json-only  (envelope JSON only, --brief 무시)
+  param([string[]]$Rest)
+  $jsonOnly = _Read-Switch -Rest $Rest -Name "--json-only"
+  $report = Get-CucpVersionReport
+  if ($jsonOnly -or -not $Brief) {
+    [Console]::Out.WriteLine(($report | ConvertTo-Json -Depth 8))
+  } else {
+    $skill = if ($report.versions.skill) { "v$($report.versions.skill)" } else { "v?" }
+    $cli = if ($report.versions.cli) { "v$($report.versions.cli)" } else { "missing" }
+    $hs = if ($report.versions.helper_server) { "v$($report.versions.helper_server)" } else { "missing" }
+    [Console]::Out.WriteLine("ok cucp $skill (skill) + $cli (cli) + $hs (helper-server, $($report.helper_mode)) surface=$($report.surface) status=$($report.status)")
+  }
+  if ($report.status -eq "partial") { return 2 }
+  return 0
+}
+
+# ============================================================================
+# v1.9.0 — Cross-platform honest stub
+# ============================================================================
+# 비Windows 환경에서 호출 시 envelope schema 일관 + live action 거부.
+# 호출자 (AI agent) 가 동일 schema 로 결과를 받아 fallback 결정 가능.
+# ============================================================================
+
+function _Make-PlatformStubEnvelope {
+  # action_kind: "live" | "read_only"
+  param([string]$Macro, [string]$ActionKind)
+  $isLive = ($ActionKind -eq "live")
+  $status = if ($isLive) { "blocked" } else { "honest_stub" }
+  $reason = if ($isLive) { "platform_unsupported" } else { "platform_stub_only" }
+  $env = [pscustomobject]@{
+    schema = "cucp.observation/v1"
+    status = $status
+    reason = $reason
+    macro = $Macro
+    platform = $Script:PlatformName
+    is_windows = $Script:IsWindowsPlatform
+    recoverable_errors = @(@{
+      code = $reason
+      layer = "wrapper"
+      recommended_action = if ($isLive) {
+        "CUCP live actuation requires Windows 10/11. Run on Windows or omit -AllowLiveControl."
+      } else {
+        "Read-only result on non-Windows is a stub. Cassette / observation may be incomplete."
+      }
+    })
+    generated_at = (Get-Date).ToString("yyyy-MM-ddTHH:mm:ss.fffK")
+  }
+  return $env
+}
+
+function _Assert-PlatformOrStub {
+  # macro 진입 시 호출. live macro + 비Windows = exit 3. read-only 는 stub envelope 출력 후 exit 0 권장.
+  param([string]$Macro, [string]$ActionKind)
+  if ($Script:IsWindowsPlatform) { return $null }
+  $env = _Make-PlatformStubEnvelope -Macro $Macro -ActionKind $ActionKind
+  if ($Brief) {
+    [Console]::Out.WriteLine("$($env.status) $Macro reason=$($env.reason) platform=$($env.platform)")
+  } else {
+    [Console]::Out.WriteLine(($env | ConvertTo-Json -Depth 8))
+  }
+  if ($ActionKind -eq "live") { return 3 }
+  return 0
+}
+
+# ============================================================================
+# v1.9.0 — Recorder / Replay
+# ============================================================================
+# trajectory hook 위에 가벼운 session recorder. wrapper invocation 안에서 발생한
+# 매크로 호출을 step 단위로 캡처하고, 나중에 dry-run 또는 라이브 재실행 가능.
+# 라이브 재실행 시에도 wrapper -AllowLiveControl 게이트는 그대로 enforce.
+# ============================================================================
+
+$Script:RecorderDir = Join-Path $Script:AuditDir "recorder"
+$Script:RecorderActive = $false
+$Script:RecorderSession = $null
+$Script:RecorderSteps = @()
+
+function _Recorder-Path {
+  param([string]$Name)
+  if (-not (Test-Path -LiteralPath $Script:RecorderDir)) {
+    try { New-Item -ItemType Directory -Path $Script:RecorderDir -Force | Out-Null } catch { }
+  }
+  $safeName = if ($Name) { $Name -replace '[^A-Za-z0-9_\-\.]', '_' } else { "session-" + (Get-Date).ToString("yyyyMMdd-HHmmss") }
+  return (Join-Path $Script:RecorderDir ($safeName + ".json"))
+}
+
+function Recorder-Start {
+  param([string]$Name)
+  $Script:RecorderActive = $true
+  $Script:RecorderSession = if ($Name) { $Name } else { "session-" + (Get-Date).ToString("yyyyMMdd-HHmmss") }
+  $Script:RecorderSteps = @()
+  return $Script:RecorderSession
+}
+
+function Recorder-Append {
+  # Invoke-Macro 안에서 호출 (현재 코드는 hook 안 함; recorder 매크로가 명시적으로 step 추가).
+  param([string]$Macro, [string[]]$Args, [int]$Exit, [int]$ElapsedMs)
+  if (-not $Script:RecorderActive) { return }
+  $Script:RecorderSteps += [pscustomobject]@{
+    ts = (Get-Date).ToString("yyyy-MM-ddTHH:mm:ss.fffK")
+    macro = $Macro
+    args = @($Args)
+    exit_code = $Exit
+    elapsed_ms = $ElapsedMs
+  }
+}
+
+function Recorder-Stop {
+  if (-not $Script:RecorderActive) {
+    return [pscustomobject]@{ status = "not_recording"; session = $null; step_count = 0; path = $null }
+  }
+  $path = _Recorder-Path -Name $Script:RecorderSession
+  $session = [pscustomobject]@{
+    schema = "cucp.recorder/v1"
+    name = $Script:RecorderSession
+    started_at = if ($Script:RecorderSteps.Count -gt 0) { $Script:RecorderSteps[0].ts } else { $null }
+    ended_at = (Get-Date).ToString("yyyy-MM-ddTHH:mm:ss.fffK")
+    step_count = $Script:RecorderSteps.Count
+    steps = $Script:RecorderSteps
+  }
+  try {
+    Set-Content -LiteralPath $path -Value ($session | ConvertTo-Json -Depth 12) -Encoding UTF8
+  } catch { }
+  $name = $Script:RecorderSession
+  $count = $Script:RecorderSteps.Count
+  $Script:RecorderActive = $false
+  $Script:RecorderSession = $null
+  $Script:RecorderSteps = @()
+  return [pscustomobject]@{ status = "saved"; session = $name; step_count = $count; path = $path }
+}
+
+function Invoke-MacroRecorder {
+  # macro recorder start [--name X]
+  # macro recorder stop
+  # macro recorder list
+  # macro recorder show --name X
+  # macro recorder replay --name X [--dry-run] [--continue-on-error]
+  param([string[]]$Rest)
+  $sub = if ($Rest.Count -gt 0) { $Rest[0] } else { "" }
+  $rest2 = if ($Rest.Count -gt 1) { $Rest[1..($Rest.Count-1)] } else { @() }
+  switch ($sub) {
+    "start" {
+      $name = _Read-OptValue -Rest $rest2 -Name "--name"
+      $sName = Recorder-Start -Name $name
+      $out = [pscustomobject]@{ schema = "cucp.recorder/v1"; status = "recording"; session = $sName }
+      if ($Brief) { [Console]::Out.WriteLine("ok recorder start session=$sName") }
+      else { [Console]::Out.WriteLine(($out | ConvertTo-Json -Depth 6)) }
+      return 0
+    }
+    "stop" {
+      $r = Recorder-Stop
+      if ($Brief) { [Console]::Out.WriteLine("ok recorder stop session=$($r.session) steps=$($r.step_count) path=$($r.path)") }
+      else { [Console]::Out.WriteLine(($r | ConvertTo-Json -Depth 6)) }
+      return 0
+    }
+    "list" {
+      $files = @()
+      if (Test-Path -LiteralPath $Script:RecorderDir) {
+        $files = @(Get-ChildItem -LiteralPath $Script:RecorderDir -Filter '*.json' -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending | Select-Object -First 50 | ForEach-Object {
+          [pscustomobject]@{ name = [System.IO.Path]::GetFileNameWithoutExtension($_.Name); path = $_.FullName; size_bytes = $_.Length; mtime = $_.LastWriteTime.ToString("yyyy-MM-ddTHH:mm:ss") }
+        })
+      }
+      $out = [pscustomobject]@{ schema = "cucp.recorder/v1"; status = "ok"; sessions = $files; count = $files.Count }
+      [Console]::Out.WriteLine(($out | ConvertTo-Json -Depth 6))
+      return 0
+    }
+    "show" {
+      $name = _Read-OptValue -Rest $rest2 -Name "--name"
+      if (-not $name) { Write-Notice -Level "ERROR" -Message "--name required"; return 1 }
+      $path = _Recorder-Path -Name $name
+      if (-not (Test-Path -LiteralPath $path)) { Write-Notice -Level "ERROR" -Message "session not found: $name"; return 1 }
+      [Console]::Out.WriteLine((Get-Content -LiteralPath $path -Raw -Encoding UTF8))
+      return 0
+    }
+    "replay" {
+      $name = _Read-OptValue -Rest $rest2 -Name "--name"
+      $dryRun = _Read-Switch -Rest $rest2 -Name "--dry-run"
+      $continueOnError = _Read-Switch -Rest $rest2 -Name "--continue-on-error"
+      if (-not $name) { Write-Notice -Level "ERROR" -Message "--name required"; return 1 }
+      $path = _Recorder-Path -Name $name
+      if (-not (Test-Path -LiteralPath $path)) { Write-Notice -Level "ERROR" -Message "session not found: $name"; return 1 }
+      $session = Get-Content -LiteralPath $path -Raw -Encoding UTF8 | ConvertFrom-Json
+      $results = @()
+      $finalExit = 0
+      foreach ($step in @($session.steps)) {
+        $stepArgs = @($step.args)
+        if ($dryRun) {
+          $results += [pscustomobject]@{ macro = $step.macro; args = $stepArgs; mode = "dry_run"; exit_code = 0 }
+          continue
+        }
+        # 라이브 재실행: Invoke-Macro 가 wrapper -AllowLiveControl 게이트를 그대로 enforce.
+        $argList = @("macro") + @($stepArgs)
+        try {
+          $code = Invoke-Macro -ArgList $argList
+          if ($null -eq $code) { $code = 0 }
+          if ($code -is [array]) { $code = ($code | Where-Object { $_ -is [int] } | Select-Object -Last 1) }
+          if ($code -isnot [int]) { try { $code = [int]$code } catch { $code = 0 } }
+        } catch {
+          $code = 1
+        }
+        $results += [pscustomobject]@{ macro = $step.macro; args = $stepArgs; mode = "live"; exit_code = $code }
+        if ($code -ne 0 -and -not $continueOnError) { $finalExit = $code; break }
+        if ($code -ne 0) { $finalExit = $code }
+      }
+      $out = [pscustomobject]@{
+        schema = "cucp.recorder-replay/v1"
+        session = $name
+        mode = if ($dryRun) { "dry_run" } else { "live" }
+        step_count = $session.step_count
+        executed = $results.Count
+        results = $results
+        exit_code = $finalExit
+      }
+      if ($Brief) { [Console]::Out.WriteLine("ok recorder replay session=$name mode=$($out.mode) executed=$($results.Count)/$($session.step_count) exit=$finalExit") }
+      else { [Console]::Out.WriteLine(($out | ConvertTo-Json -Depth 12)) }
+      return $finalExit
+    }
+    default {
+      Write-Notice -Level "ERROR" -Message "recorder sub-command 필요: start | stop | list | show | replay"
+      return 1
+    }
+  }
+}
+
+# ============================================================================
+# v2.0.0 — Governance: audit-summary / policy-check
+# ============================================================================
+# 기존 trajectory.ndjson 파일들을 시간대 / 매크로 / exit_code 별로 집계.
+# policy-check 는 사용자가 정의한 policy 파일 (JSON) 을 평가해서
+# allow / deny / require_confirm 세 결과 중 하나를 반환.
+# ============================================================================
+
+function Invoke-MacroAuditSummary {
+  param([string[]]$Rest)
+  $sinceMin = _Read-OptValue -Rest $Rest -Name "--since-minutes"
+  $jsonOnly = _Read-Switch -Rest $Rest -Name "--json-only"
+  $cutoff = $null
+  if ($sinceMin) {
+    try { $cutoff = (Get-Date).AddMinutes(-1 * [int]$sinceMin) } catch { $cutoff = $null }
+  }
+  $files = @()
+  if (Test-Path -LiteralPath $Script:AuditDir) {
+    $files = @(Get-ChildItem -LiteralPath $Script:AuditDir -Filter 'trajectory*.ndjson' -ErrorAction SilentlyContinue -Recurse | Sort-Object LastWriteTime -Descending | Select-Object -First 20)
+  }
+  $totalEvents = 0
+  $byMacro = @{}
+  $byExit = @{}
+  $sensitiveCount = 0
+  $blockedCount = 0
+  $earliest = $null
+  $latest = $null
+  foreach ($f in $files) {
+    try {
+      $lines = Get-Content -LiteralPath $f.FullName -Encoding UTF8 -ErrorAction SilentlyContinue
+      foreach ($line in @($lines)) {
+        if ([string]::IsNullOrWhiteSpace($line)) { continue }
+        try {
+          $ev = $line | ConvertFrom-Json -ErrorAction Stop
+        } catch { continue }
+        if ($cutoff -and $ev.ts) {
+          try { $evTs = [datetime]$ev.ts } catch { $evTs = $null }
+          if ($evTs -and $evTs -lt $cutoff) { continue }
+        }
+        $totalEvents++
+        $m = "$($ev.macro)"
+        if (-not $m) { $m = "$($ev.action)" }
+        if ($m) {
+          if (-not $byMacro.ContainsKey($m)) { $byMacro[$m] = 0 }
+          $byMacro[$m] = $byMacro[$m] + 1
+        }
+        $ec = "$($ev.exit_code)"
+        if ($ec) {
+          if (-not $byExit.ContainsKey($ec)) { $byExit[$ec] = 0 }
+          $byExit[$ec] = $byExit[$ec] + 1
+        }
+        if ($ev.sensitive -or "$($ev.reason)" -match 'sensitive') { $sensitiveCount++ }
+        if ($ev.status -eq "blocked" -or $ec -eq "3") { $blockedCount++ }
+        if ($ev.ts) {
+          if (-not $earliest -or "$($ev.ts)" -lt $earliest) { $earliest = "$($ev.ts)" }
+          if (-not $latest   -or "$($ev.ts)" -gt $latest)   { $latest   = "$($ev.ts)" }
+        }
+      }
+    } catch { }
+  }
+  $status = if ($totalEvents -eq 0) { "empty" } else { "ok" }
+  $out = [pscustomobject]@{
+    schema = "cucp.audit-summary/v1"
+    status = $status
+    file_count = @($files).Count
+    event_count = $totalEvents
+    earliest_ts = $earliest
+    latest_ts = $latest
+    by_macro = $byMacro
+    by_exit_code = $byExit
+    sensitive_count = $sensitiveCount
+    blocked_count = $blockedCount
+    since_cutoff = if ($cutoff) { $cutoff.ToString("yyyy-MM-ddTHH:mm:ss.fffK") } else { $null }
+  }
+  if ($Brief -and -not $jsonOnly) {
+    [Console]::Out.WriteLine("$status audit-summary files=$($files.Count) events=$totalEvents sensitive=$sensitiveCount blocked=$blockedCount")
+  } else {
+    [Console]::Out.WriteLine(($out | ConvertTo-Json -Depth 8))
+  }
+  return 0
+}
+
+function Invoke-MacroPolicyCheck {
+  param([string[]]$Rest)
+  $action = _Read-OptValue -Rest $Rest -Name "--action"
+  $policyPath = _Read-OptValue -Rest $Rest -Name "--policy"
+  $jsonOnly = _Read-Switch -Rest $Rest -Name "--json-only"
+  if (-not $action) { Write-Notice -Level "ERROR" -Message "--action <macro> required"; return 1 }
+  $policy = $null
+  $policyError = $null
+  if ($policyPath) {
+    if (Test-Path -LiteralPath $policyPath) {
+      try { $policy = Get-Content -LiteralPath $policyPath -Raw -Encoding UTF8 | ConvertFrom-Json }
+      catch { $policyError = "policy_parse_failed: $($_.Exception.Message)"; $policy = $null }
+    } else { $policyError = "policy_not_found" }
+  }
+  # 기본 정책: live macro = require_confirm, read-only = allow.
+  # 정책 파일이 있으면 그 결과로 override.
+  $liveMacros = @("click-label","click-id","click-point","fill-label","shortcut","type-native",
+    "smart-click","ime-paste","safe-type-ime","safe-type","cdp-smart-click","cdp-smart-type",
+    "cdp-prosemirror-insert","mouse-verify","recovery-run","auto-do","goal","app-launch","app-close")
+  $sensitiveMacros = @("recovery-run","auto-do","goal")
+  $decision = "allow"
+  $reason = "default_read_only"
+  if ($liveMacros -contains $action) { $decision = "require_confirm"; $reason = "default_live_macro" }
+  if ($sensitiveMacros -contains $action) { $decision = "require_confirm"; $reason = "default_sensitive" }
+  $matchedRule = $null
+  if ($policy) {
+    foreach ($rule in @($policy.rules)) {
+      $pat = "$($rule.match)"
+      if (-not $pat) { continue }
+      $matched = $false
+      try {
+        if ($action -match $pat) { $matched = $true }
+      } catch { $matched = ($action -eq $pat) }
+      if ($matched) {
+        $decision = "$($rule.decision)"
+        if (-not $decision) { $decision = "allow" }
+        $reason = if ($rule.reason) { "$($rule.reason)" } else { "policy_match:$pat" }
+        $matchedRule = $rule
+        break
+      }
+    }
+  }
+  $out = [pscustomobject]@{
+    schema = "cucp.policy/v1"
+    status = "ok"
+    action = $action
+    decision = $decision
+    reason = $reason
+    matched_rule = $matchedRule
+    policy_path = $policyPath
+    policy_error = $policyError
+  }
+  if ($Brief -and -not $jsonOnly) {
+    [Console]::Out.WriteLine("ok policy-check action=$action decision=$decision reason=$reason")
+  } else {
+    [Console]::Out.WriteLine(($out | ConvertTo-Json -Depth 6))
+  }
+  if ($decision -eq "deny") { return 3 }
+  return 0
+}
+
+# ============================================================================
+# v2.0.0 — Vision LLM Token Budget Gate
+# ============================================================================
+# vision-click / vision-find / vision-click-precise 호출 누적 추적.
+# wrapper invocation 안에서만 누적 (단일 invocation scope).
+# CUCP_VISION_MAX_CALLS / CUCP_VISION_MAX_TOKENS 환경변수로 한도 설정.
+# ============================================================================
+
+$Script:VisionBudget = [pscustomobject]@{
+  calls = 0
+  tokens = 0
+  max_calls = if ($env:CUCP_VISION_MAX_CALLS) { try { [int]$env:CUCP_VISION_MAX_CALLS } catch { $null } } else { $null }
+  max_tokens = if ($env:CUCP_VISION_MAX_TOKENS) { try { [int]$env:CUCP_VISION_MAX_TOKENS } catch { $null } } else { $null }
+  history = @()
+}
+
+function _Vision-CheckBudget {
+  param([string]$Macro, [int]$EstimatedTokens = 1000)
+  if ($Script:VisionBudget.max_calls -and $Script:VisionBudget.calls -ge $Script:VisionBudget.max_calls) {
+    return @{ allowed = $false; reason = "vision_budget_calls_exceeded"; max_calls = $Script:VisionBudget.max_calls; calls = $Script:VisionBudget.calls }
+  }
+  if ($Script:VisionBudget.max_tokens -and ($Script:VisionBudget.tokens + $EstimatedTokens) -gt $Script:VisionBudget.max_tokens) {
+    return @{ allowed = $false; reason = "vision_budget_tokens_exceeded"; max_tokens = $Script:VisionBudget.max_tokens; tokens = $Script:VisionBudget.tokens; estimated = $EstimatedTokens }
+  }
+  return @{ allowed = $true }
+}
+
+function _Vision-RecordCall {
+  param([string]$Macro, [int]$Tokens = 1000)
+  $Script:VisionBudget.calls = $Script:VisionBudget.calls + 1
+  $Script:VisionBudget.tokens = $Script:VisionBudget.tokens + $Tokens
+  $Script:VisionBudget.history += [pscustomobject]@{ ts = (Get-Date).ToString("HH:mm:ss"); macro = $Macro; tokens = $Tokens }
 }
 
 # ============================================================================
@@ -1746,7 +2295,9 @@ function Invoke-Macro {
     "icon-click","vision-click","vision-click-precise","click-and-verify",
     "click-and-verify-screen","ocr-click","ocr-uia-invoke","cdp-type","cdp-click",
     "cdp-smart-click","cdp-smart-type","auto-do","goal","notify","multi-select",
-    "multi-edit","clipboard","process","registry"
+    "multi-edit","clipboard","process","registry",
+    "mouse-verify","cdp-prosemirror-insert","ime-paste","safe-type-ime",
+    "recovery-run"
   )
   if ($AllowLiveControl -and ($directSafetyLiveMacros -contains $sub) -and -not (_Read-Switch -Rest $rest -Name "--confirm-sensitive")) {
     $directSafety = _Classify-SafetyFromText -Text ((@($sub) + @($rest)) -join " ") -MacroName $sub
@@ -1768,6 +2319,10 @@ function Invoke-Macro {
 
   switch ($sub) {
     "safety-classify" { return Invoke-MacroSafetyClassify -Rest $rest }
+    "version"       { return Invoke-MacroVersion -Rest $rest }
+    "recorder"      { return Invoke-MacroRecorder -Rest $rest }
+    "audit-summary" { return Invoke-MacroAuditSummary -Rest $rest }
+    "policy-check"  { return Invoke-MacroPolicyCheck -Rest $rest }
     "daemon"        { return Invoke-MacroDaemon -Rest $rest }
     "mouse-verify"  { return Invoke-MacroMouseVerify -Rest $rest }
     "click-label"   { return Invoke-MacroClickLabel -Rest $rest }
@@ -1884,7 +2439,7 @@ function Invoke-Macro {
     "click-and-verify" { return Invoke-MacroClickAndVerify -Rest $rest }
     "auto-do"       { return Invoke-MacroAutoDo -Rest $rest }
     default {
-      Write-Notice -Level "ERROR" -Message "알 수 없는 매크로: $sub. 사용 가능: safety-classify, click-label, double-click-label, right-click-label, click-id, click-point, fill-label, focus-window, focus-verify, wait-window, wait-label, find-label, list-affordances, shortcut, goal, session, self-test, trajectory, ensure-helper, vision-find, vision-click, vision-click-precise, icon-find, icon-click, screenshot, windows, log-tail, diagnose-lag, cleanup, clipboard, process, registry, notify, multi-select, multi-edit, scrape, dom-snapshot, metrics, perf, health-detail, health-quick, app-launch, app-close, with-app, click-and-verify, auto-do, native-health, task-card, native-windows, native-screenshot, type-native, shortcut-native, uia-click-label, uia-invoke, uia-set-value, uia-toggle, workflow-plan, workflow-run, smart-plan, app-profile, task-preset, task-plan, task-run, form-plan, form-run, smart-click, watch, ocr-screen, ocr-image, ocr-find-text, ocr-click, ocr-uia-fuse, screenshot-diff, click-and-verify-screen, ocr-uia-invoke, history, coord-profile, coord-map, coord-anchor, hit-test, hit-test-batch, hit-scan, point-plan, target-validate, safe-type, cdp-detect, cdp-eval, cdp-type, cdp-click, cdp-smart-find, cdp-smart-type-find, cdp-smart-click, cdp-smart-type, cdp-deep-find, ime-paste, safe-type-ime, modal-detect, recovery-plan, recovery-run, precision-validate, benchmark, release-notes"
+      Write-Notice -Level "ERROR" -Message "알 수 없는 매크로: $sub. 사용 가능: version, safety-classify, daemon, mouse-verify, click-label, double-click-label, right-click-label, click-id, click-point, fill-label, focus-window, focus-verify, wait-window, wait-label, find-label, list-affordances, shortcut, goal, session, self-test, trajectory, ensure-helper, vision-find, vision-click, vision-click-precise, icon-find, icon-click, screenshot, windows, log-tail, diagnose-lag, cleanup, clipboard, process, registry, notify, multi-select, multi-edit, scrape, dom-snapshot, metrics, perf, health-detail, health-quick, app-launch, app-close, with-app, click-and-verify, auto-do, native-health, task-card, native-windows, native-screenshot, type-native, shortcut-native, uia-click-label, uia-invoke, uia-set-value, uia-toggle, workflow-plan, workflow-run, smart-plan, app-profile, task-preset, task-plan, task-run, form-plan, form-run, smart-click, watch, ocr-screen, ocr-image, ocr-find-text, ocr-click, ocr-uia-fuse, screenshot-diff, click-and-verify-screen, ocr-uia-invoke, history, coord-profile, coord-map, coord-anchor, hit-test, hit-test-batch, hit-scan, point-plan, target-validate, safe-type, cdp-detect, cdp-eval, cdp-type, cdp-click, cdp-smart-find, cdp-smart-type-find, cdp-smart-click, cdp-smart-type, cdp-deep-find, cdp-prosemirror-insert, ime-paste, safe-type-ime, modal-detect, recovery-plan, recovery-run, precision-validate, benchmark, release-notes"
       throw "Unknown macro: $sub"
     }
   }
@@ -4349,6 +4904,22 @@ Do NOT include markdown fences, prose, or explanations outside the JSON object.
 
 function Invoke-MacroVisionFind {
   param([string[]]$Rest)
+  # v2.0.0 — vision LLM token budget gate
+  $bg = _Vision-CheckBudget -Macro "vision-find" -EstimatedTokens 1000
+  if (-not $bg.allowed) {
+    $payload = [pscustomobject]@{
+      schema = "cucp.safety-block/v1"
+      status = "blocked"
+      reason = $bg.reason
+      macro = "vision-find"
+      budget = $Script:VisionBudget
+      next_action = "Increase CUCP_VISION_MAX_CALLS / CUCP_VISION_MAX_TOKENS or unset to disable budget."
+    }
+    if ($Brief) { [Console]::Out.WriteLine("blocked vision-find reason=$($bg.reason)") }
+    else { [Console]::Out.WriteLine(($payload | ConvertTo-Json -Depth 6)) }
+    return 3
+  }
+  _Vision-RecordCall -Macro "vision-find" -Tokens 1000
   $description = _Read-OptValue -Rest $Rest -Name "--describe"
   $screenshot = _Read-OptValue -Rest $Rest -Name "--screenshot"
   $model = _Read-OptValue -Rest $Rest -Name "--model"
@@ -4403,6 +4974,22 @@ function Invoke-MacroVisionFind {
 
 function Invoke-MacroVisionClick {
   param([string[]]$Rest)
+  # v2.0.0 — vision LLM token budget gate
+  $bg = _Vision-CheckBudget -Macro "vision-click" -EstimatedTokens 1500
+  if (-not $bg.allowed) {
+    $payload = [pscustomobject]@{
+      schema = "cucp.safety-block/v1"
+      status = "blocked"
+      reason = $bg.reason
+      macro = "vision-click"
+      budget = $Script:VisionBudget
+      next_action = "Increase CUCP_VISION_MAX_CALLS / CUCP_VISION_MAX_TOKENS or unset to disable budget."
+    }
+    if ($Brief) { [Console]::Out.WriteLine("blocked vision-click reason=$($bg.reason)") }
+    else { [Console]::Out.WriteLine(($payload | ConvertTo-Json -Depth 6)) }
+    return 3
+  }
+  _Vision-RecordCall -Macro "vision-click" -Tokens 1500
   $description = _Read-OptValue -Rest $Rest -Name "--describe"
   $window = _Read-OptValue -Rest $Rest -Name "--window"
   $verifyLabel = _Read-OptValue -Rest $Rest -Name "--verify-label"
@@ -13864,6 +14451,23 @@ function Invoke-MacroMouseVerify {
     [Console]::Out.WriteLine(($out | ConvertTo-Json -Depth 10))
   }
   if ($passed) { return 0 } else { return 2 }
+}
+
+# v1.8.0 — `cucp version` (top-level) 을 wrapper 통합 surface 로 가로챔.
+# cli backend 로 위임하기 전에 wrapper 의 Get-CucpVersionReport 가 skill+cli+helper-server
+# 셋을 묶은 envelope 을 직접 emit. cli backend 의 v1.0.0 자체 버전은 그 안에 포함됨.
+if ($CucpArgs.Count -ge 1 -and $CucpArgs[0] -eq "version") {
+  $rest = if ($CucpArgs.Count -gt 1) { $CucpArgs[1..($CucpArgs.Count-1)] } else { @() }
+  try {
+    $code = Invoke-MacroVersion -Rest $rest
+    if ($null -eq $code) { $code = 0 }
+    if ($code -is [array]) { $code = ($code | Where-Object { $_ -is [int] } | Select-Object -Last 1) }
+    if ($code -isnot [int]) { try { $code = [int]$code } catch { $code = 0 } }
+    exit $code
+  } catch {
+    Write-Notice -Level "ERROR" -Message "$($_.Exception.Message)"
+    exit 1
+  }
 }
 
 # Macro path

@@ -1,85 +1,81 @@
 # CUCP Remaining Work
 
-Updated: 2026-05-27
+Updated: 2026-05-29
 
-Current progress estimate: **100%** (functional 6 missing items) +
-**v1.5.1 XG5000 task-card bridge**. Next sprint: helper persistent server (named pipe IPC)
-가 진짜 8-20x 가속을 single-shot 에서도 측정 가능하게 만드는 핵심.
+Current progress estimate: **100%** (v2.1.0). Helper persistent server, wrapper daemon,
+ProseMirror live, mouse-verify cassette, Option B layer, recorder, governance, vision
+budget 모두 통합 완료. 라이브 cassette 4환경 보존만 사용자 직접 실행 필요.
 
-## v1.5.1 — XG5000 / XP-Builder context bridge
+## v2.1.0 — Option B + Reliability + Enterprise (2026-05-29)
 
-- Added `macro task-card open|show|ensure|save|path|clear` for device, address range, requirement, and safety context.
-- Added `scripts/cucp-task-card.ps1`, a small WinForms card that writes `%TEMP%\computer-use-control-plane\task-card\current-task-card.json`.
-- `app-profile` now auto-loads `task_card` for PLC/SCADA-like windows such as XG5000, XP-Builder, CIMON, XGT, PLC, and Modbus tools.
-- Added `references/xg5000-task-card.md` and a separate Codex skill under `skills/xg5000-cucp-assistant/`.
+### Layer 통합 (Phase 2)
+- `Get-CucpVersionReport` + `cucp version --json-only` (skill / cli / helper-server 통합 envelope).
+- `$Script:SkillVersion` single source of truth.
 
-## v1.4.0 — 6 missing items 구현 결과
+### Reliability (Phase 3)
+- Cross-platform honest stub (`platform_unsupported` exit 3 + read-only `honest_stub`).
+- Recorder + replay (`macro recorder start/stop/list/show/replay --dry-run/--allow-live`).
+- safety gate enforce on replay live (P7 invariant).
 
-### 1. Browser/Electron DOM bridge v2 — 완료
-- `cdp-smart-find` / `cdp-smart-type` / `cdp-smart-type-find` 가 `deepCollect()` 로
-  Shadow DOM 과 same-origin iframe 안까지 traversal (최대 4 hops, 1200 nodes 캡).
-- 새 read-only 매크로 `cdp-deep-find` 가 traversal 메타정보
-  (shadow_roots_seen / iframes_seen / iframes_blocked / total_nodes) 보고.
-- cross-origin iframe 은 `contentDocument` 접근 차단 시 안전하게 skip.
+### Enterprise (Phase 4)
+- `macro audit-summary [--since-minutes N]` (trajectory.ndjson 집계).
+- `macro policy-check --action <macro> [--policy <file>]` (allow / deny / require_confirm).
+- Vision LLM token budget (`CUCP_VISION_MAX_CALLS` / `CUCP_VISION_MAX_TOKENS`).
+- Helper-server PipeSecurity owner-only ACL (fail-soft).
+- lock 파일에 `owner_user` / `owner_sid` (multi-user 격리).
 
-### 2. Coordinate precision v2 validation — 완료
-- 새 read-only 매크로 `precision-validate --x N --y N --samples N` 가
-  같은 좌표를 반복 `hit-scan` 해서 drift_max / drift_avg / stable / recommendation 보고.
-- micro-toolbar / canvas-인접 좌표가 안정적인지 라이브 클릭 없이 사전 검증 가능.
+### Live cassette runner
+- `references\live-cassette-runner.ps1` (Notepad / Kiro / Chrome / XG5000).
+- 사용법: `.\references\live-cassette-runner.ps1 -Env all`.
+- 결과: `live-verify\<env>\*.json` (cucp.live-verify/v1 schema).
 
-### 3. UI recovery loop — 완료
-- 새 read-only 매크로 `modal-detect` 가 UIA WindowPattern.IsModal +
-  dialog class name (`#32770`/`MessageBox`/`TaskDialog`) + 작은 윈도우 크기를 점수화.
-- 새 read-only 매크로 `recovery-plan` 이 modal-detect + foreground 결과로
-  rank 된 recovery_candidates[] (dismiss_modal / confirm_modal / re_observe / retry_failed_step) 추천.
-- 새 live 매크로 `recovery-run` 은 `--dry-run` 또는
-  `-AllowLiveControl + --confirm-sensitive` 둘 다 있어야 actuation. 그 외엔 exit 3 (sensitive gate).
+## v1.7.0 ~ v2.0.0 milestones (요약)
 
-### 4. Korean input/IME handling — 완료
-- 새 native helper action `ime-paste` 가 `System.Windows.Forms.Clipboard` 백업 →
-  텍스트 set → `SendKeys "^v"` → 클립보드 복구 순서로 IME 조합 모드 우회.
-- 새 wrapper macro `safe-type-ime` 가 focus → ime-paste → 선택적 verify(window title)
-  를 묶어서 노트패드 / 브라우저 contenteditable / 메일 앱 한글 입력 안정화.
-- 마우스 안 움직이고 hit-test 가드 (`--target-match` / `--target-hwnd`) 통과해야 paste.
+### v1.7.0 (server cache 확장)
+- helper-server 의 `ocr-screen-fast`, `uia-find-fast` (process-scope cache).
+- `macro daemon batch --file <commands.json>` (cascade chain 17~21x warm 가속).
+- `macro mouse-verify --x --y --samples N` (post_click drift 통계).
+- `macro cdp-prosemirror-insert` (CDP `Input.insertText`).
 
-### 5. Benchmark suite — 완료
-- 새 read-only 매크로 `benchmark --iters N` 이 4 read-only target
-  (windows / health / focused / modal-detect) 에 대해 p50/p95/avg + per-target SLO + slo_pass_rate 측정.
-- 텍스트/PII 미포함, 타이밍/카운트만 출력. 라이브 클래스룸 안 씀.
+### v1.6.0 (helper-server 통합)
+- Lock + IPC + server-first 라우팅 + lifecycle 매크로 (`session start-helper / stop-helper / helper-status`).
+- CLI cache (`wrapper-cache/cli-path.txt`, single-shot 45% 감소).
+- Mouse SendInput race 제거 + `post_click` envelope 필드.
 
-### 6. Packaging — 완료
-- 새 read-only 매크로 `release-notes [--version X] [--since X]` 가 CHANGELOG 를
-  버전별로 split 해서 highlights / added / improved / verified / fixed 추출.
-- 보안: `_Cucp-RedactSecrets` 헬퍼가 GitHub PAT / OpenAI sk- / AWS AKIA / Bearer / JWT / PEM 패턴
-  을 출력 직전 `[REDACTED:...]` 로 치환. release_notes 가 외부 push 시 secret leak 방지.
-- migration_notes / external_agent_usage 자동 포함.
+### v1.5.1 (학원본 통합)
+- XG5000 task-card bridge + 별도 Codex skill `xg5000-cucp-assistant`.
 
-## 보안 보완 (이전 4.6 누락분 보정)
+### v1.4.0 (6 missing items)
+- DOM bridge v2 (Shadow DOM / iframe traversal), modal-detect, recovery-plan/run,
+  ime-paste / safe-type-ime, precision-validate, benchmark, release-notes (secret redaction).
 
-- `release-notes`: secret/credential 패턴 출력 전 redact (5개 패턴 + 6번째 PEM block).
-- `recovery-run`: live action 은 `--confirm-sensitive` 강제 (sensitive_recovery_requires_confirmation gate).
-- `benchmark`: 입력 텍스트 미수집, helper child 만 호출, audit log 따로 안 만듦.
-- `safe-type-ime`: 클립보드 백업/복구 보장, hit-test 가드 통과해야 actuation.
+## 진짜 남은 것 (사용자 결정 / 별도 sprint)
+
+- **라이브 cassette 4환경 보존**: 코드 + runner script 준비 완료. 사용자 1회 실행 필요 — `.\references\live-cassette-runner.ps1 -Env all`.
+- **smart-click history fast-track** (cascade 첫 stage skip): 현재 history 매크로는 read-only. fast-track hook 은 별도 sprint.
+- **macOS / Linux 라이브 검증**: 본 sprint 는 schema 검증만 + honest_stub. 실제 라이브 actuation 은 Windows 외 환경에서 별도.
+- **DXGI capture / multi-monitor coord-anchor**: roadmap 후보.
+- **OS World 외부 벤치 통합**: 라이센스 / 데이터 외부 의존, 사용자 결정 대기.
+- **rubric / auto-eval 매크로**: cassette 보존 후 도입 가능. 본 sprint 범위 외.
+- **Visual planner UI**: 별도 spec 권장.
+
+## 보안 보완 (이전 4.6 누락분 보정 + v2.1.0)
+
+- `release-notes`: secret redact (PAT/sk-/AKIA/Bearer/JWT/PEM 6종 패턴).
+- `recovery-run`: live action 은 `--confirm-sensitive` 강제.
+- `benchmark`: 텍스트/PII 미수집.
+- `safe-type-ime`: 클립보드 백업/복구 보장.
 - `precision-validate`: read-only — 좌표 클릭 없이 분석만.
+- **v2.0.0 PipeSecurity ACL**: helper-server pipe 가 owner-only.
+- **v2.0.0 lock owner_user 격리**: 다른 user 의 lock 무시.
+- **v2.0.0 vision budget gate**: vision-find / vision-click 누적 한도 초과 시 exit 3.
+- **v2.0.0 policy-check + audit-summary**: governance / 감사 envelope.
+- **v1.9.0 platform stub**: 비Windows 환경 live action 거부 (exit 3 platform_unsupported).
 
-## Done — Verification
+## Verified
 
-- AST parse: cucp.ps1 / cucp-native-helper.ps1 / cucp.Tests.ps1 모두 OK.
-- Pester: 설치 repo 기준 2026-05-27 회귀 테스트 190/190 통과.
-- Sanity check 라이브: cdp-deep-find / modal-detect / recovery-plan / recovery-run --dry-run /
-  precision-validate / benchmark / release-notes 모두 의도된 envelope + exit code 반환.
-- Secret redaction: 합성 CHANGELOG 의 PAT / sk- / AKIA / Bearer 4종 모두 [REDACTED:*] 치환 검증.
+- AST parse: cucp.ps1 / cucp-native-helper.ps1 / cucp-helper-server.ps1 모두 OK.
+- Pester: 190 / 190 (timing-flaky 1건은 v1.6.0 baseline 부터 동일 양상의 외부 동기화 의존 testcase).
+- helper-server 라이프사이클 + lock owner 검사 + version envelope 직접 측정.
+- safety gate: vision budget / mouse-verify / cdp-prosemirror-insert / recovery-run 모두 `-AllowLiveControl` 없을 때 exit 3.
 
-## v1.5+ 후보 (현재 100%, 추가 확장은 옵션)
-
-- **Helper persistent server (named pipe IPC)** — single-shot wrapper invocation
-  에서도 8-20x 가속 측정 가능하게. v1.5.0 의 hot cache 가 cascade chain 한정인
-  이유를 정공법으로 해결.
-- **CDP WebSocket connection 재사용** — helper server 안에서만 의미 있음.
-- **smart-click history fast-track** — 최근 3회 같은 strategy + score≥80 이면
-  cascade 첫 stage 부터 시작하지 말고 그 stage 부터 skip.
-- DXGI capture (game/full-screen surface) — 게임 / 풀스크린 영역 capture 우회.
-- Auto-mask region — `screenshot-diff` 가 노이즈가 큰 영역(시계/배지/캐럿 등) 자동 식별.
-- Multi-monitor coord-anchor — display layout 변화 시 anchor 자동 재 anchor.
-- macOS / Linux 포팅 — 현재 Windows 10/11 전용.
-- Vision-language fallback 의 token cost 측정 + budget gate.
