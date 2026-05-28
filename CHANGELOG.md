@@ -1,5 +1,22 @@
 # CUCP Changelog
 
+## v1.5.1 — XG5000 task-card context bridge (2026-05-27)
+
+### Added
+
+- `macro task-card open|show|ensure|save|path|clear`: small local context card for XG5000/XP-Builder work.
+- Task-card JSON schema `cucp.task-card/v1` with tool, project, PLC model, communication, devices, address ranges, requirements, constraints, notes, and safety flags.
+- `app-profile` now auto-loads `task_card` for PLC/SCADA-like windows so CUCP can plan with device and requirement context.
+- Added `scripts/cucp-task-card.ps1` and `references/xg5000-task-card.md`.
+- Added a separate Codex skill at `skills/xg5000-cucp-assistant/SKILL.md` for XG5000/XP-Builder sessions.
+
+### Verified
+
+- Parsed wrapper and task-card scripts with PowerShell AST.
+- Verified `task-card ensure`, `task-card show`, `task-card save`, `task-card path`, and `app-profile --match XG5000` task-card loading.
+
+---
+
 ## v1.5.0 — Performance: hot cache + CDP preflight cache + benchmark baseline (2026-05-27)
 
 ### 큰 틀 목표 + 정직 평가
@@ -120,7 +137,7 @@ PII 미수집 benchmark 도 함께 보완.
 ### Verified
 
 - AST parse: cucp.ps1 / cucp-native-helper.ps1 / cucp.Tests.ps1 모두 OK.
-- Pester: 학원본 베이스라인 177/177 + v1.4.0 신규 14건 추가 (총 191건).
+- Pester: 설치 repo 기준 2026-05-27 회귀 테스트 190/190 통과.
 - Sanity check 라이브: 9개 매크로 모두 의도된 envelope schema + exit code 반환.
 - Secret redaction 검증: 합성 CHANGELOG 의 PAT / sk- / AKIA / Bearer 4종 모두 `[REDACTED:*]` 치환.
 
