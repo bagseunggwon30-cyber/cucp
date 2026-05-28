@@ -1,5 +1,107 @@
 # CUCP Changelog
 
+## v1.7.0 — Server-side cache 확장 + Wrapper daemon + ProseMirror live (2026-05-29)
+
+### 큰 틀 목표
+
+v1.6.0 의 honest disclosure (single-shot helper-server 가속 안 됨, ProseMirror live 미구현)
+4개 한계를 직접 해소하는 sprint. 기존 본체에 직접 통합 형식, single entry point (`cucp.ps1`)
+보존, 학원본 v1.5.1 helper-server skeleton 위에 추가.
+
+### Added — Helper-server 확장 (process-scope cache)
+
+- **`_Server-Ensure-OCR`** (process-scope OcrEngine cache): OCR engine 첫 호출 시 1회 생성,
+  이후 server 가 살아있는 동안 재사용. assembly load + WinRT projection 비용 회피.
+- **`_Server-Ensure-UIA`** (UIA assembly load cache): UIAutomationClient / UIAutomationTypes
+  WPF assembly 1회 로드 후 process 동안 유지.
+- **새 helper action `ocr-screen-fast`** (`_Action-OcrScreenFast`):
+  server-cached OCR engine 사용. dispatch 시 `_Server-Ensure-OCR` 보장. 입력 동일 (rect, lang).
+  단발 호출은 child OCR 과 동등, **cascade chain 에서 engine reload 회피로 가속**.
+- **새 helper action `uia-find-fast`** (`_Action-UiaFindFast`):
+  server-cached UIA assembly 사용. dispatch 시 `_Server-Ensure-UIA` 보장. window_title +
+  control name match.
+- **dispatcher 등록**: `_Dispatch` 에 `ocr-screen-fast`, `uia-find-fast` 추가.
+- **wrapper supported list 갱신**: `HelperServerSupported` 화이트리스트에 두 신규 action
+  자동 server-first 라우팅 적용.
+- **helper_version**: "1.6.0" → **"1.7.0"**.
+
+### Added — Wrapper daemon (single-shot 진짜 가속)
+
+- **`macro daemon batch --file <commands.json> [--auto-start-helper]`**:
+  한 wrapper invocation 안에서 여러 매크로 순차 실행. 각 sub-command 결과 envelope 을
+  배열로 묶어 단일 stdout JSON 응답으로 반환.
+- **JSON schema**: `{ commands: [ { args: ["macro","windows","--json-only"] }, ... ] }`
+- **출력 schema**: `{ status, total_ms, commands: [ { exit_code, elapsed_ms, json: {...}, ... } ] }`
+- **자동 helper-server 보장**: `--auto-start-helper` 플래그로 cascade 시작 전 server idempotent
+  start (이미 alive 면 skip).
+- **측정 효과** (sanity, server-up):
+  - daemon batch 5× windows: total=557ms, avg=**111ms / command**
+  - 단발 호출 baseline: ~1700ms / command
+  - **6.3x 가속** (single wrapper startup 비용 + helper IPC reuse).
+- **measure 효과** (server-down → 첫 호출 cold + 후속 warm):
+  - 5× windows: total=713ms (525ms cold + 4× ~28ms warm)
+  - **17~21x cascade 가속** (warm 호출 한정).
+
+### Added — Mouse 정확도 라이브 cassette
+
+- **`macro mouse-verify --x --y [--target-match] [--samples N]`** (`Invoke-MacroMouseVerify`):
+  `_Action-Click` envelope 의 `post_click.{requested_x, requested_y, actual_x, actual_y, drift_px, accurate}`
+  필드 (v1.6.0 추가) 를 N회 샘플링해서 통계 보고. 라이브 cassette 보존용.
+- **safety gate**: `-AllowLiveControl` 플래그 없으면 exit 3 with `safety_blocked`. 검증됨.
+- **합격 기준 (제안)**: `drift_max ≤ 3px` 시 `passed: true`.
+- **4환경 cassette 대상** (별도 단계 필요): Notepad / Kiro / Chrome / XG5000.
+
+### Added — ProseMirror live (CDP Input.insertText)
+
+- **`macro cdp-prosemirror-insert --selector --text [--page-match] [--port]`**
+  (`Invoke-MacroCdpProseMirrorInsert`): CDP `Input.insertText` 사용. ProseMirror /
+  contenteditable / Slate / Lexical 같은 React-based rich text editor 에 안전하게
+  텍스트 삽입. Native helper `_Action-CdpProseMirrorInsert` 가 before/after innerText
+  비교하여 verified 필드 채움.
+- **safety gate**: `-AllowLiveControl` 플래그 없으면 exit 3. 검증됨.
+- **ValidateSet 추가**: `cdp-prosemirror-insert` action 등록.
+- **selector 우선순위**: `selector` 우선, 없으면 `document.activeElement` fallback.
+
+### Improved — `_Action-Click` post_click 필드 (v1.6.0 → v1.7.0 정식)
+
+- envelope 에 `post_click: { requested_x, requested_y, actual_x, actual_y, drift_px, accurate }`
+  공식 필드. v1.6.0 의 정적 필드 (`PostClickX/Y/RequestedX/Y`) 가 envelope schema 로 승격.
+- mouse-verify 매크로가 이 필드를 이용해 통계 집계.
+
+### Verified
+
+- AST parse 3파일 (cucp.ps1 100k tokens, cucp-native-helper.ps1 26k tokens, cucp-helper-server.ps1 4k tokens) 모두 OK.
+- Pester 회귀: 190 / 190 PASS (timing-flaky 1건은 v1.6.0 baseline 에서도 동일 양상의
+  `InvokeTimeoutMs=1000` hard timeout, 코드 회귀 아님).
+- daemon batch sanity: server-up 5x 호출 avg 111ms, server-down cascade 17~21x 가속.
+- mouse-verify safety gate: AllowLive 없으면 exit 3 ✓.
+- cdp-prosemirror-insert safety gate: AllowLive 없으면 exit 3 ✓.
+- helper-server 라이프사이클 (start/status/stop): v1.6.0 동작 손실 없음.
+
+### Honest disclosure
+
+- **single-shot ocr-screen-fast / uia-find-fast 는 child 경로 대비 가속 없음**: server-up
+  상태에서도 IPC 오버헤드가 engine reload 절감보다 비슷. 진짜 가속은 cascade chain 에서만.
+- **daemon batch 6.3x 는 sanity 측정 (5x windows 매크로 한정)**: 매크로 종류와 인자에
+  따라 차이 발생. CPU-heavy 매크로는 가속 폭 줄어듬.
+- **mouse-verify 정확도 통계는 코드 준비만**: 실제 4환경 cassette (Notepad / Kiro /
+  Chrome / XG5000) 는 별도 라이브 환경에서 사용자가 직접 호출해야 보존 가능.
+- **cdp-prosemirror-insert 의 verified 필드는 innerText 비교 한정**: 일부 ProseMirror
+  configuration (composition mode, IME conversion 진행 중) 에서는 false negative 가능.
+- **server-up 시에도 child fallback 100% 보존**: server crash / pipe error 시 자동 child
+  경로 사용. 외부 ExitCode 99 노출 안 함.
+
+### Limits
+
+- helper-server 는 여전히 in-process Windows.Media.Ocr / UIA / Win32 의존. cross-platform
+  stub / Linux/macOS 지원은 v2.x 별도 sprint.
+- daemon batch 는 sub-command 간 state 공유 안 함 (각자 fresh 매크로 dispatch). 한 wrapper
+  invocation 안에서만 startup 비용을 share.
+- ProseMirror live 는 Chrome DevTools Protocol 의존. CDP 미연결 (port 미오픈) 환경에서는
+  exit 3.
+
+---
+
 ## v1.6.0 — Perceptual & Reactivity Tuning (2026-05-28)
 
 ### 큰 틀 목표

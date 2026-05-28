@@ -72,6 +72,7 @@ param(
     "cdp-detect", "cdp-eval", "cdp-type", "cdp-click",
     "cdp-smart-click", "cdp-smart-type", "cdp-smart-find", "cdp-smart-type-find",
     "cdp-deep-find",
+    "cdp-prosemirror-insert",
     "ime-paste", "modal-detect",
     "health"
   )]
@@ -2744,12 +2745,34 @@ function _Action-Click {
   $isDouble = ($Button -eq "double")
   $btn = if ($isDouble) { "left" } else { $Button }
   [CucpNative]::SendMouseClick($X, $Y, $btn, $isDouble)
+  # v1.7.0: 사후 좌표 검증 — SendInput absolute 가 OS scaling / DPI 에 의해 drift 가능
+  $postX = $X
+  $postY = $Y
+  $postOk = $true
+  $drift = 0
+  try {
+    $postX = [int][CucpNative]::PostClickX
+    $postY = [int][CucpNative]::PostClickY
+    $dx = $postX - $X
+    $dy = $postY - $Y
+    $drift = [int][Math]::Round([Math]::Sqrt($dx*$dx + $dy*$dy))
+    # drift > 3px 면 정확도 경고 (DPI scaling / virtual desktop 경계)
+    if ($drift -gt 3) { $postOk = $false }
+  } catch { }
   $payload = [ordered]@{
     status = "ok"
     x = $X; y = $Y; button = $Button; double = $isDouble
     target_hwnd = $TargetHwnd
     target_match = $TargetMatch
     click_refine = $ClickRefine
+    post_click = [ordered]@{
+      requested_x = $X
+      requested_y = $Y
+      actual_x = $postX
+      actual_y = $postY
+      drift_px = $drift
+      accurate = $postOk
+    }
   }
   if ($refined) {
     $payload["original"] = [ordered]@{ x=$originalX; y=$originalY }
@@ -4264,6 +4287,105 @@ function _Action-ImePaste {
 }
 
 # ============================================================================
+# ============================================================================
+# v1.7.0 Action: cdp-prosemirror-insert  ─ ProseMirror live 텍스트 입력
+# ============================================================================
+# 동기: ProseMirror / TipTap 같은 contenteditable 에디터는 v1.3.0 부터 부채.
+# 이전 cdp-type / cdp-smart-type 의 execCommand('insertText') 는 React/Vue
+# state machine 이 거부. CDP `Input.insertText` 는 OS-level keyboard event
+# simulation 이라 ProseMirror schema 가 수용함.
+#
+# 입력: -CdpText <text>  -CdpSelector <css>  [-CdpPort 9222] [-CdpPageMatch <s>]
+# 출력: { status, route, before_value, after_value, changed, page_id, page_title }
+# ============================================================================
+function _Action-CdpProseMirrorInsert {
+  if (-not $CdpText) {
+    _Emit @{status="error"; reason="missing_text"; recommended_action="provide -CdpText"} 1
+  }
+  if (-not $CdpSelector) {
+    _Emit @{status="error"; reason="missing_selector"; recommended_action="provide -CdpSelector (CSS for ProseMirror root, e.g. '.ProseMirror' or '[contenteditable=true]')"} 1
+  }
+  $detect = _Cdp-Detect -Port $CdpPort
+  if (-not $detect.available) {
+    _Emit @{
+      status = "partial"
+      reason = "cdp_port_closed"
+      port = $CdpPort
+      detail = $detect.error
+      recommended_action = "launch chrome/electron with --remote-debugging-port=$CdpPort"
+    } 2
+  }
+  $page = _Cdp-FindPage -Detect $detect -PageMatch $CdpPageMatch
+  if (-not $page) {
+    _Emit @{status="partial"; reason="no_matching_page"; page_match=$CdpPageMatch} 2
+  }
+  $wsUrl = $page.ws_url
+  # 1. enable required domains
+  try {
+    [void](_Cdp-WsCall -WsUrl $wsUrl -Method "DOM.enable" -Params @{})
+    [void](_Cdp-WsCall -WsUrl $wsUrl -Method "Runtime.enable" -Params @{})
+    [void](_Cdp-WsCall -WsUrl $wsUrl -Method "Input.enable" -Params @{})
+  } catch {
+    # Input.enable 일부 환경에서 not supported — 무시하고 계속
+  }
+  # 2. focus selector + before snapshot via Runtime.evaluate
+  $selJs = ($CdpSelector -replace "'", "\\'")
+  $focusExpr = "(function(){var el=document.querySelector('$selJs'); if(!el) return null; el.focus(); el.scrollIntoView(); return el.innerText || el.textContent || '';})()"
+  $beforeResp = _Cdp-WsCall -WsUrl $wsUrl -Method "Runtime.evaluate" -Params @{
+    expression = $focusExpr
+    returnByValue = $true
+  }
+  if (-not $beforeResp.ok) {
+    _Emit @{status="error"; reason="focus_failed"; detail=$beforeResp.error} 1
+  }
+  $beforeValue = ""
+  try { $beforeValue = "$($beforeResp.result.result.value)" } catch { $beforeValue = "" }
+  if ($null -eq $beforeResp.result.result.value) {
+    _Emit @{
+      status = "partial"
+      reason = "selector_not_found"
+      selector = $CdpSelector
+      page_id = "$($page.id)"
+      page_title = "$($page.title)"
+      recommended_action = "verify selector matches a ProseMirror root or [contenteditable=true]"
+    } 2
+  }
+  # 3. Input.insertText — OS-level event, ProseMirror state machine accepts
+  $insertResp = _Cdp-WsCall -WsUrl $wsUrl -Method "Input.insertText" -Params @{ text = $CdpText }
+  if (-not $insertResp.ok) {
+    _Emit @{status="error"; reason="input_inserttext_failed"; detail=$insertResp.error} 1
+  }
+  Start-Sleep -Milliseconds 80  # ProseMirror state update + re-render
+  # 4. after snapshot
+  $afterExpr = "(function(){var el=document.querySelector('$selJs'); if(!el) return null; return el.innerText || el.textContent || '';})()"
+  $afterResp = _Cdp-WsCall -WsUrl $wsUrl -Method "Runtime.evaluate" -Params @{
+    expression = $afterExpr
+    returnByValue = $true
+  }
+  $afterValue = ""
+  try { $afterValue = "$($afterResp.result.result.value)" } catch { $afterValue = "" }
+  $changed = ($afterValue -ne $beforeValue) -and ($afterValue -match [regex]::Escape($CdpText))
+  $payload = [ordered]@{
+    status = if ($changed) { "ok" } else { "partial" }
+    route = "cdp_input_inserttext"
+    page_id = "$($page.id)"
+    page_title = "$($page.title)"
+    selector = $CdpSelector
+    text_inserted = $CdpText
+    before_value = $beforeValue
+    after_value = $afterValue
+    before_length = [int]$beforeValue.Length
+    after_length = [int]$afterValue.Length
+    changed = $changed
+  }
+  if (-not $changed) {
+    $payload["reason"] = "value_unchanged_or_text_not_found"
+    $payload["recommended_action"] = "verify ProseMirror is not in IME composition mode; try cdp-type as fallback"
+  }
+  _Emit $payload
+}
+
+# ============================================================================
 # v1.4.0 Action: modal-detect  ─ 모달/팝업/대화상자 감지 (UI recovery loop 용)
 # ============================================================================
 # 동기: 라이브 step 이 실패한 후, "왜 실패했지?" 를 답하기 위해 화면에 새로 떴거나
@@ -4401,6 +4523,7 @@ switch ($Action) {
   "cdp-smart-type-find" { _Action-CdpSmartTypeFind }
   "cdp-smart-type"  { _Action-CdpSmartType }
   "cdp-deep-find"   { _Action-CdpDeepFind }
+  "cdp-prosemirror-insert" { _Action-CdpProseMirrorInsert }
   "ime-paste"       { _Action-ImePaste }
   "modal-detect"    { _Action-ModalDetect }
 }
