@@ -6,7 +6,7 @@
 
 **AI 에이전트가 Windows 데스크톱을 안전하게 관찰하고 조작하기 위한 control plane**
 
-[![Version](https://img.shields.io/badge/version-v1.5.1-blue.svg)](https://github.com/bagseunggwon30-cyber/cucp/releases/tag/v1.5.1)
+[![Version](https://img.shields.io/badge/version-v1.6.0-blue.svg)](https://github.com/bagseunggwon30-cyber/cucp/releases/tag/v1.6.0)
 [![Platform](https://img.shields.io/badge/platform-Windows%2010%2F11-0078D4.svg?logo=windows)](https://learn.microsoft.com/windows/)
 [![PowerShell](https://img.shields.io/badge/PowerShell-5.1%2B-5391FE.svg?logo=powershell)](https://learn.microsoft.com/powershell/)
 [![Tests](https://img.shields.io/badge/Pester-190%2F190%20passing-brightgreen.svg)](#-검증-상태)
@@ -40,8 +40,9 @@ window enum   accessible      screenshot /          한/영/일/중             
 
 표준 Win32 앱부터 Electron / Chromium 앱까지 모두 다룬다.
 
-> **v1.5.1 한 줄 요약**: XG5000 / XP-Builder 수업·실습용 `task-card` 추가.
-> 디바이스, 주소 범위, 요구조건, 안전 제약을 JSON으로 저장하고 `app-profile`이 PLC/SCADA 창에서 자동 로드한다.
+> **v1.6.0 한 줄 요약**: helper-persistent-server 통합 + CLI cache (single-shot 45% 감소)
+> + 마우스 actuation race 제거. AI agent (Codex / Claude / Kiro / 일반 LLM) 어디든 단일
+> entry point (`cucp.ps1`) 로 사용. 학원본 v1.5.1 task-card / helper-server skeleton 보존.
 
 ---
 
