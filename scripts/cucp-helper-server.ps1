@@ -286,6 +286,224 @@ function _Action-ModalDetect {
 # =============================================================================
 # Dispatch + JSON 프로토콜
 # =============================================================================
+# v1.7.0 — OCR engine + UIA element process-scope cache
+# =============================================================================
+# server 가 long-running 이라 OCR engine 1회 init 후 영속, UIA 객체도 같은 STA
+# thread 에서 reuse. cold-start ~700ms × N → warm ~50ms × N.
+# =============================================================================
+$Script:_OCREngine = $null
+$Script:_OCRError = $null
+$Script:_UIALoaded = $false
+
+function _Server-Ensure-OCR {
+  if ($Script:_OCREngine) { return $true }
+  try {
+    Add-Type -AssemblyName System.Runtime.WindowsRuntime -ErrorAction Stop
+    [void][Windows.Media.Ocr.OcrEngine, Windows.Media.Ocr, ContentType=WindowsRuntime]
+    [void][Windows.Storage.StorageFile, Windows.Storage, ContentType=WindowsRuntime]
+    [void][Windows.Graphics.Imaging.SoftwareBitmap, Windows.Graphics.Imaging, ContentType=WindowsRuntime]
+    [void][Windows.Graphics.Imaging.BitmapDecoder, Windows.Graphics.Imaging, ContentType=WindowsRuntime]
+    [void][Windows.Storage.Streams.RandomAccessStream, Windows.Storage.Streams, ContentType=WindowsRuntime]
+    [void][Windows.Globalization.Language, Windows.Globalization, ContentType=WindowsRuntime]
+    $engine = [Windows.Media.Ocr.OcrEngine]::TryCreateFromUserProfileLanguages()
+    if (-not $engine) {
+      $avail = [Windows.Media.Ocr.OcrEngine]::AvailableRecognizerLanguages
+      if ($avail -and $avail.Count -gt 0) {
+        $engine = [Windows.Media.Ocr.OcrEngine]::TryCreateFromLanguage($avail[0])
+      }
+    }
+    if (-not $engine) { $Script:_OCRError = "no_ocr_language_available"; return $false }
+    $Script:_OCREngine = $engine
+    return $true
+  } catch {
+    $Script:_OCRError = $_.Exception.Message
+    return $false
+  }
+}
+
+function _Server-Ensure-UIA {
+  if ($Script:_UIALoaded) { return $true }
+  try {
+    Add-Type -AssemblyName UIAutomationClient -ErrorAction Stop
+    Add-Type -AssemblyName UIAutomationTypes -ErrorAction Stop
+    Add-Type -AssemblyName WindowsBase -ErrorAction Stop
+    $Script:_UIALoaded = $true
+    return $true
+  } catch { return $false }
+}
+
+# =============================================================================
+# Action: ocr-screen-fast (read-only, server-cached engine)
+# screen region 캡처 + OCR. server scope OcrEngine reuse 로 cold start 회피.
+# =============================================================================
+function _Action-OcrScreenFast {
+  param([hashtable]$Args)
+  if (-not (_Ensure-Win32Loaded)) {
+    return @{ status="error"; reason="win32_unavailable" }
+  }
+  if (-not (_Server-Ensure-OCR)) {
+    return @{ status="error"; reason="ocr_init_failed"; detail=$Script:_OCRError }
+  }
+  Add-Type -AssemblyName System.Drawing -ErrorAction Stop
+  # region 결정 (전체 가상 데스크톱 또는 인자 X/Y/W/H)
+  $vx = 0; $vy = 0; $vw = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds.Width
+  try {
+    Add-Type -AssemblyName System.Windows.Forms -ErrorAction SilentlyContinue
+    $vw = [System.Windows.Forms.SystemInformation]::VirtualScreen.Width
+  } catch { }
+  $sx = if ($Args.X) { [int]$Args.X } else { 0 }
+  $sy = if ($Args.Y) { [int]$Args.Y } else { 0 }
+  $sw = if ($Args.W) { [int]$Args.W } else { 800 }
+  $sh = if ($Args.H) { [int]$Args.H } else { 600 }
+  $maxDim = 10000
+  try { $maxDim = [Windows.Media.Ocr.OcrEngine]::MaxImageDimension } catch { }
+  if ($sw -gt $maxDim -or $sh -gt $maxDim) {
+    return @{ status="error"; reason="region_exceeds_max_image_dimension"; max_dim=$maxDim }
+  }
+  $tmp = [System.IO.Path]::Combine([System.IO.Path]::GetTempPath(), "cucp-srv-ocr-$([guid]::NewGuid().ToString('N')).png")
+  $bmp = $null; $g = $null
+  try {
+    $bmp = New-Object System.Drawing.Bitmap $sw, $sh
+    $g = [System.Drawing.Graphics]::FromImage($bmp)
+    $g.CopyFromScreen($sx, $sy, 0, 0, (New-Object System.Drawing.Size $sw, $sh))
+    $bmp.Save($tmp, [System.Drawing.Imaging.ImageFormat]::Png)
+  } catch {
+    return @{ status="error"; reason="screenshot_failed"; detail=$_.Exception.Message }
+  } finally {
+    if ($g) { $g.Dispose() }
+    if ($bmp) { $bmp.Dispose() }
+  }
+  # OCR — async helper
+  try {
+    $asTask = [WindowsRuntimeSystemExtensions].GetMethods() | Where-Object {
+      $_.Name -eq "AsTask" -and $_.GetParameters().Count -eq 1 -and $_.IsGenericMethod
+    } | Select-Object -First 1
+    function _AsyncWait { param($Op, [Type]$T)
+      $g = $asTask.MakeGenericMethod($T)
+      $t = $g.Invoke($null, @($Op))
+      $t.Wait()
+      return $t.Result
+    }
+    $file = _AsyncWait ([Windows.Storage.StorageFile]::GetFileFromPathAsync($tmp)) ([Windows.Storage.StorageFile])
+    $stream = _AsyncWait ($file.OpenAsync([Windows.Storage.FileAccessMode]::Read)) ([Windows.Storage.Streams.IRandomAccessStream])
+    $decoder = _AsyncWait ([Windows.Graphics.Imaging.BitmapDecoder]::CreateAsync($stream)) ([Windows.Graphics.Imaging.BitmapDecoder])
+    $sbmp = _AsyncWait ($decoder.GetSoftwareBitmapAsync()) ([Windows.Graphics.Imaging.SoftwareBitmap])
+    $result = _AsyncWait ($Script:_OCREngine.RecognizeAsync($sbmp)) ([Windows.Media.Ocr.OcrResult])
+    $lines = @()
+    foreach ($line in $result.Lines) {
+      $lines += @{
+        text = $line.Text
+        word_count = $line.Words.Count
+      }
+    }
+    return @{
+      status = "ok"
+      schema = "cucp.ocr-screen/v1"
+      region = @{ x=$sx; y=$sy; w=$sw; h=$sh }
+      text = $result.Text
+      line_count = $lines.Count
+      lines = $lines
+      engine_warm = $true
+    }
+  } catch {
+    return @{ status="error"; reason="ocr_failed"; detail=$_.Exception.Message }
+  } finally {
+    Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue
+  }
+}
+
+# =============================================================================
+# Action: uia-find-fast (read-only, server-cached UIA)
+# 같은 server process 안에서 UIAutomation assembly 1회 load, 매 호출 reuse.
+# =============================================================================
+function _Action-UiaFindFast {
+  param([hashtable]$Args)
+  if (-not (_Server-Ensure-UIA)) {
+    return @{ status="error"; reason="uia_load_failed" }
+  }
+  if (-not (_Ensure-Win32Loaded)) {
+    return @{ status="error"; reason="win32_unavailable" }
+  }
+  $label = if ($Args.Label) { "$($Args.Label)" } else { $null }
+  $match = if ($Args.Match) { "$($Args.Match)" } else { $null }
+  if (-not $label) {
+    return @{ status="error"; reason="missing_label" }
+  }
+  try {
+    $root = [System.Windows.Automation.AutomationElement]::RootElement
+    # 좁은 scope — match 가 있으면 해당 윈도우만, 없으면 root children 중 visible
+    $scope = [System.Windows.Automation.TreeScope]::Children
+    $target = $root
+    if ($match) {
+      $rxMatch = [regex]::new([regex]::Escape($match), [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+      $children = $root.FindAll([System.Windows.Automation.TreeScope]::Children, [System.Windows.Automation.Condition]::TrueCondition)
+      foreach ($w in $children) {
+        try {
+          $title = "$($w.Current.Name)"
+          if ($rxMatch.IsMatch($title)) { $target = $w; break }
+        } catch { }
+      }
+    }
+    # Subtree 안에서 Name 부분 일치 (case-insensitive)
+    $rxLabel = [regex]::new([regex]::Escape($label), [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+    $cands = New-Object System.Collections.ArrayList
+    $all = $target.FindAll([System.Windows.Automation.TreeScope]::Subtree, [System.Windows.Automation.Condition]::TrueCondition)
+    $idx = 0
+    foreach ($el in $all) {
+      $idx++
+      if ($idx -gt 800) { break }  # cap
+      try {
+        $name = "$($el.Current.Name)"
+        if (-not $name) { continue }
+        if (-not $rxLabel.IsMatch($name)) { continue }
+        $rect = $el.Current.BoundingRectangle
+        if ($rect.Width -le 0 -or $rect.Height -le 0) { continue }
+        $score = 50
+        if ($name -ieq $label) { $score = 100 }
+        elseif ($name.ToLowerInvariant().StartsWith($label.ToLowerInvariant())) { $score = 80 }
+        $cx = [int]($rect.X + $rect.Width / 2)
+        $cy = [int]($rect.Y + $rect.Height / 2)
+        [void]$cands.Add(@{
+          name = $name
+          score = $score
+          rect = @{ x=[int]$rect.X; y=[int]$rect.Y; w=[int]$rect.Width; h=[int]$rect.Height }
+          click_point = @{ x=$cx; y=$cy }
+          control_type = "$($el.Current.LocalizedControlType)"
+        })
+        if ($cands.Count -ge 16) { break }
+      } catch { continue }
+    }
+    $sorted = @($cands | Sort-Object -Property score -Descending)
+    $best = if ($sorted.Count -gt 0) { $sorted[0] } else { $null }
+    if ($best) {
+      return @{
+        status = "ok"
+        schema = "cucp.uia-find/v1"
+        label = $label
+        match = $match
+        score = [int]$best.score
+        best = $best
+        candidates = @($sorted)
+        candidate_count = [int]$sorted.Count
+        uia_warm = $true
+      }
+    } else {
+      return @{
+        status = "partial"
+        reason = "no_match"
+        label = $label
+        match = $match
+        candidate_count = 0
+      }
+    }
+  } catch {
+    return @{ status="error"; reason="uia_query_failed"; detail=$_.Exception.Message }
+  }
+}
+
+# =============================================================================
+# Dispatch + JSON 프로토콜
+# =============================================================================
 $Script:_StartedAt = [DateTime]::UtcNow
 $Script:_RequestCount = 0
 
@@ -293,11 +511,13 @@ function _Dispatch {
   param([string]$Action, [hashtable]$Args)
   $Script:_RequestCount++
   switch ($Action) {
-    "windows"      { return _Action-Windows -Args $Args }
-    "health"       { return _Action-Health -Args $Args }
-    "focused"      { return _Action-Focused -Args $Args }
-    "modal-detect" { return _Action-ModalDetect -Args $Args }
-    "shutdown"     { return @{ status="ok"; shutting_down=$true } }
+    "windows"          { return _Action-Windows -Args $Args }
+    "health"           { return _Action-Health -Args $Args }
+    "focused"          { return _Action-Focused -Args $Args }
+    "modal-detect"     { return _Action-ModalDetect -Args $Args }
+    "ocr-screen-fast"  { return _Action-OcrScreenFast -Args $Args }
+    "uia-find-fast"    { return _Action-UiaFindFast -Args $Args }
+    "shutdown"         { return @{ status="ok"; shutting_down=$true } }
     default {
       return @{
         status = "fallback_required"
@@ -316,7 +536,7 @@ $lockData = @{
   pid = $PID
   pipe_name = $PipeName
   started_at = $Script:_StartedAt.ToString("o")
-  helper_version = "1.6.0"
+  helper_version = "1.7.0"
 }
 try {
   $lockJson = $lockData | ConvertTo-Json -Compress

@@ -231,8 +231,8 @@ if (-not $Script:NativeHelperPath) {
 $Script:HelperLockPath = Join-Path $Script:AuditDir "helper.pid"
 $Script:HelperServerScript = Join-Path $PSScriptRoot "cucp-helper-server.ps1"
 $Script:_HelperPipeReqId = 0
-# server 가 직접 처리 가능한 action 화이트리스트 (cucp-helper-server.ps1 v1.6.0 의 _Dispatch 와 일치)
-$Script:HelperServerSupported = @("windows", "health", "focused", "modal-detect")
+# server 가 직접 처리 가능한 action 화이트리스트 (cucp-helper-server.ps1 v1.7.0 의 _Dispatch 와 일치)
+$Script:HelperServerSupported = @("windows", "health", "focused", "modal-detect", "ocr-screen-fast", "uia-find-fast")
 
 function _Read-LockSafely {
   # 결과: hashtable {pid, pipe_name, started_at, helper_version} 또는 $null
@@ -1768,6 +1768,8 @@ function Invoke-Macro {
 
   switch ($sub) {
     "safety-classify" { return Invoke-MacroSafetyClassify -Rest $rest }
+    "daemon"        { return Invoke-MacroDaemon -Rest $rest }
+    "mouse-verify"  { return Invoke-MacroMouseVerify -Rest $rest }
     "click-label"   { return Invoke-MacroClickLabel -Rest $rest }
     "double-click-label" { return Invoke-MacroClickLabel -Rest $rest -Double }
     "right-click-label"  { return Invoke-MacroClickLabel -Rest $rest -RightClick }
@@ -1858,6 +1860,7 @@ function Invoke-Macro {
     "cdp-smart-type"    { return Invoke-MacroCdpSmartType -Rest $rest }
     # ── v1.4.0 6 missing items ──────────────────────────────────────────────
     "cdp-deep-find"     { return Invoke-MacroCdpDeepFind -Rest $rest }
+    "cdp-prosemirror-insert" { return Invoke-MacroCdpProseMirrorInsert -Rest $rest }
     "ime-paste"         { return Invoke-MacroImePaste -Rest $rest }
     "safe-type-ime"     { return Invoke-MacroSafeTypeIme -Rest $rest }
     "modal-detect"      { return Invoke-MacroModalDetect -Rest $rest }
@@ -13615,6 +13618,252 @@ function Invoke-MacroReleaseNotes {
     [Console]::Out.WriteLine(($out | ConvertTo-Json -Depth 10))
   }
   return 0
+}
+
+# ============================================================================
+# v1.7.0 — daemon batch + mouse-verify (single-shot 누적 가속 + 정확도 측정)
+# ============================================================================
+
+# ----------------------------------------------------------------------------
+# macro cdp-prosemirror-insert --selector <css> --text <s>
+#   [--page-match <s>] [--port <n>]
+# ----------------------------------------------------------------------------
+# v1.3.0 부터 부채인 ProseMirror live 입력 해결. CDP `Input.insertText` 사용.
+# ProseMirror / TipTap 같은 React state-managed editor 가 execCommand 거부 시
+# 이 매크로 사용. live actuation 이라 -AllowLiveControl 필수.
+# ----------------------------------------------------------------------------
+function Invoke-MacroCdpProseMirrorInsert {
+  param([string[]]$Rest)
+  if (-not $AllowLiveControl) { throw "macro cdp-prosemirror-insert requires -AllowLiveControl" }
+  $selector = _Read-OptValue -Rest $Rest -Name "--selector"
+  $text = _Read-OptValue -Rest $Rest -Name "--text"
+  $pageMatch = _Read-OptValue -Rest $Rest -Name "--page-match"
+  $portStr = _Read-OptValue -Rest $Rest -Name "--port"
+  $port = 9222
+  if ($portStr) { try { $port = [int]$portStr } catch { $port = 9222 } }
+  if (-not $selector) { throw "macro cdp-prosemirror-insert requires --selector (CSS, e.g. '.ProseMirror')" }
+  if (-not $text) { throw "macro cdp-prosemirror-insert requires --text" }
+  if (-not (Test-CdpPortQuick -Port $port -TimeoutMs 120)) {
+    $payload = [ordered]@{
+      schema = "cucp.cdp-prosemirror-insert/v1"
+      status = "partial"
+      reason = "cdp_port_closed"
+      port = $port
+      recommended_action = "launch chrome/electron with --remote-debugging-port=$port (see references/cdp-setup.md)"
+    }
+    if ($Brief) { [Console]::Out.WriteLine("partial cdp-prosemirror-insert port=$port closed") }
+    else { [Console]::Out.WriteLine(($payload | ConvertTo-Json -Depth 8)) }
+    return 2
+  }
+  $argList = @(
+    "-Action","cdp-prosemirror-insert",
+    "-CdpSelector",$selector,
+    "-CdpText",$text,
+    "-CdpPort","$port"
+  )
+  if ($pageMatch) { $argList += @("-CdpPageMatch", $pageMatch) }
+  $r = Invoke-NativeHelper -ArgList $argList
+  $out = [ordered]@{ schema = "cucp.cdp-prosemirror-insert/v1" }
+  if ($r.Json) {
+    foreach ($p in $r.Json.PSObject.Properties) { $out[$p.Name] = $p.Value }
+  } else {
+    $out["status"] = "error"
+    $out["reason"] = "helper_failed"
+  }
+  if ($Brief) {
+    if ($r.Json -and $r.Json.status -eq "ok" -and $r.Json.changed) {
+      [Console]::Out.WriteLine("ok cdp-prosemirror-insert before_len=$($r.Json.before_length) after_len=$($r.Json.after_length) text='$text'")
+    } else {
+      $reason = if ($r.Json -and $r.Json.reason) { "$($r.Json.reason)" } else { "unknown" }
+      [Console]::Out.WriteLine("partial cdp-prosemirror-insert reason=$reason")
+    }
+  } else {
+    [Console]::Out.WriteLine(($out | ConvertTo-Json -Depth 10))
+  }
+  if ($r.Json) {
+    switch ($r.Json.status) {
+      "ok"      { return 0 }
+      "blocked" { return 3 }
+      default   { return 2 }
+    }
+  }
+  return 1
+}
+
+# ----------------------------------------------------------------------------
+# macro daemon batch <commands.json>
+# ----------------------------------------------------------------------------
+# 한 wrapper invocation 안에서 여러 매크로를 순차 실행. PowerShell startup +
+# CLI cache + helper-server 라이프사이클 비용을 1회로 묶음. AI agent 가 여러
+# 매크로를 한 번에 실행할 때 유용.
+#
+# commands.json 형식:
+#   { "commands": [
+#       { "macro": "windows", "args": [] },
+#       { "macro": "find-label", "args": ["--label", "Save"] },
+#       { "macro": "session", "args": ["info"] }
+#   ]}
+#
+# 출력: { schema, total_count, success_count, failed_count, results: [...] }
+# ----------------------------------------------------------------------------
+function Invoke-MacroDaemon {
+  param([string[]]$Rest)
+  $action = if ($Rest.Count -ge 1) { $Rest[0] } else { "" }
+  switch ($action) {
+    "batch" {
+      $cmdFile = _Read-OptValue -Rest $Rest -Name "--file"
+      $autoStart = _Read-Switch -Rest $Rest -Name "--auto-start-helper"
+      if (-not $cmdFile) { throw "macro daemon batch requires --file <commands.json>" }
+      if (-not (Test-Path -LiteralPath $cmdFile)) { throw "commands.json not found: $cmdFile" }
+      $cmdJson = $null
+      try {
+        $cmdJson = Get-Content -LiteralPath $cmdFile -Raw -Encoding UTF8 | ConvertFrom-Json
+      } catch { throw "invalid commands.json: $($_.Exception.Message)" }
+      if (-not $cmdJson.commands) { throw "commands.json must have 'commands' array" }
+      $commands = @($cmdJson.commands)
+      # 자동으로 helper-server 띄우기 (옵션)
+      $serverWasUp = $false
+      if ($autoStart) {
+        $hs = Get-HelperServerStatus
+        if ($hs.alive) { $serverWasUp = $true }
+        else { try { Start-HelperServer -IdleTimeoutMs 60000 | Out-Null } catch { } }
+      }
+      $results = New-Object System.Collections.ArrayList
+      $successCount = 0
+      $failedCount = 0
+      $batchSw = [System.Diagnostics.Stopwatch]::StartNew()
+      foreach ($c in $commands) {
+        $macroName = "$($c.macro)"
+        $macroArgs = @()
+        if ($c.args) { $macroArgs = @($c.args | ForEach-Object { "$_" }) }
+        $itemSw = [System.Diagnostics.Stopwatch]::StartNew()
+        $itemRes = [ordered]@{
+          macro = $macroName
+          args = @($macroArgs)
+          exit_code = 0
+          elapsed_ms = 0
+        }
+        try {
+          # macro 키워드 + args 묶어서 dispatch 재호출
+          $argList = @("macro", $macroName) + $macroArgs
+          $code = Invoke-Macro -ArgList $argList
+          if ($null -eq $code) { $code = 0 }
+          if ($code -is [array]) { $code = $code[-1] }
+          if ($code -isnot [int]) { try { $code = [int]$code } catch { $code = 0 } }
+          $itemRes["exit_code"] = $code
+          if ($code -eq 0) { $successCount++ } else { $failedCount++ }
+        } catch {
+          $itemRes["exit_code"] = 1
+          $itemRes["error"] = $_.Exception.Message
+          $failedCount++
+        }
+        $itemSw.Stop()
+        $itemRes["elapsed_ms"] = [int]$itemSw.Elapsed.TotalMilliseconds
+        [void]$results.Add($itemRes)
+      }
+      $batchSw.Stop()
+      # 자동 시작했고 원래 down 이었으면 정리
+      if ($autoStart -and -not $serverWasUp) {
+        try { Stop-HelperServer | Out-Null } catch { }
+      }
+      $out = [ordered]@{
+        schema = "cucp.daemon-batch/v1"
+        status = "ok"
+        total_count = $commands.Count
+        success_count = $successCount
+        failed_count = $failedCount
+        elapsed_ms = [int]$batchSw.Elapsed.TotalMilliseconds
+        avg_ms_per_command = if ($commands.Count -gt 0) { [int]($batchSw.Elapsed.TotalMilliseconds / $commands.Count) } else { 0 }
+        helper_server_used = (Get-HelperServerStatus).alive
+        results = @($results)
+      }
+      if ($Brief) {
+        [Console]::Out.WriteLine("ok daemon batch total=$($out.total_count) success=$($out.success_count) failed=$($out.failed_count) elapsed_ms=$($out.elapsed_ms) avg=$($out.avg_ms_per_command)ms")
+      } else {
+        [Console]::Out.WriteLine(($out | ConvertTo-Json -Depth 10))
+      }
+      return 0
+    }
+    default {
+      Write-Notice -Level "ERROR" -Message "daemon 하위 명령: batch --file <commands.json> [--auto-start-helper]"
+      return 1
+    }
+  }
+}
+
+# ----------------------------------------------------------------------------
+# macro mouse-verify --x <n> --y <n> [--target-match <s>] [--samples N]
+# ----------------------------------------------------------------------------
+# 좌표 클릭의 정확도 cassette. -AllowLiveControl 필수. 실제 click 후 도착 좌표
+# (post_click.actual_x/y) 와 요청 좌표 비교 → drift 측정.
+# 정확도 = drift_max ≤ 3px AND target window 일치율 100%.
+# 본체에서 1환경 검증 후 cassette 보존 (Notepad / Kiro / Chrome / XG5000).
+# ----------------------------------------------------------------------------
+function Invoke-MacroMouseVerify {
+  param([string[]]$Rest)
+  if (-not $AllowLiveControl) { throw "macro mouse-verify requires -AllowLiveControl" }
+  $xStr = _Read-OptValue -Rest $Rest -Name "--x"
+  $yStr = _Read-OptValue -Rest $Rest -Name "--y"
+  if (-not $xStr -or -not $yStr) { throw "macro mouse-verify requires --x and --y" }
+  $tm = _Read-OptValue -Rest $Rest -Name "--target-match"
+  $samplesStr = _Read-OptValue -Rest $Rest -Name "--samples"
+  $samples = 3
+  if ($samplesStr) { try { $samples = [int]$samplesStr } catch { $samples = 3 } }
+  if ($samples -lt 1) { $samples = 1 }
+  if ($samples -gt 10) { $samples = 10 }
+  $x = [int]$xStr
+  $y = [int]$yStr
+  $records = New-Object System.Collections.ArrayList
+  for ($i = 0; $i -lt $samples; $i++) {
+    $argList = @("-Action","click","-X","$x","-Y","$y","-Button","left")
+    if ($tm) { $argList += @("-TargetMatch", $tm) }
+    $r = Invoke-NativeHelper -ArgList $argList
+    $rec = [ordered]@{
+      iter = $i + 1
+      exit_code = [int]$r.ExitCode
+      route = if ($r.Route) { "$($r.Route)" } else { "child" }
+    }
+    if ($r.Json) {
+      if ($r.Json.post_click) {
+        $rec["actual_x"] = [int]$r.Json.post_click.actual_x
+        $rec["actual_y"] = [int]$r.Json.post_click.actual_y
+        $rec["drift_px"] = [int]$r.Json.post_click.drift_px
+        $rec["accurate"] = [bool]$r.Json.post_click.accurate
+      }
+      if ($r.Json.status) { $rec["status"] = "$($r.Json.status)" }
+      if ($r.Json.reason) { $rec["reason"] = "$($r.Json.reason)" }
+    }
+    [void]$records.Add($rec)
+    Start-Sleep -Milliseconds 200  # OS event settling
+  }
+  # 통계
+  $drifts = @($records | Where-Object { $_.drift_px -ne $null } | ForEach-Object { [int]$_.drift_px })
+  $accurateCount = @($records | Where-Object { $_.accurate -eq $true }).Count
+  $blockedCount = @($records | Where-Object { $_.exit_code -eq 3 }).Count
+  $okCount = @($records | Where-Object { $_.exit_code -eq 0 }).Count
+  $driftMax = if ($drifts.Count -gt 0) { [int]($drifts | Measure-Object -Maximum).Maximum } else { 0 }
+  $driftAvg = if ($drifts.Count -gt 0) { [int]($drifts | Measure-Object -Average).Average } else { 0 }
+  $passed = ($accurateCount -eq $samples -and $blockedCount -eq 0)
+  $out = [ordered]@{
+    schema = "cucp.mouse-verify/v1"
+    status = if ($passed) { "ok" } else { "partial" }
+    requested = [ordered]@{ x = $x; y = $y; target_match = $tm; samples = $samples }
+    samples_count = $records.Count
+    ok_count = $okCount
+    blocked_count = $blockedCount
+    accurate_count = $accurateCount
+    drift_max_px = $driftMax
+    drift_avg_px = $driftAvg
+    passed = $passed
+    cassette = @($records)
+    recommendation = if ($passed) { "safe_to_click" } elseif ($driftMax -le 5) { "use_with_micro_refine" } else { "use_uia_pattern_or_relabel" }
+  }
+  if ($Brief) {
+    [Console]::Out.WriteLine("$($out.status) mouse-verify samples=$samples drift_max=${driftMax}px accurate=$accurateCount/$samples passed=$passed")
+  } else {
+    [Console]::Out.WriteLine(($out | ConvertTo-Json -Depth 10))
+  }
+  if ($passed) { return 0 } else { return 2 }
 }
 
 # Macro path
