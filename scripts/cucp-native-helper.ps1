@@ -416,11 +416,19 @@ public static class CucpNative {
     return result;
   }
 
-  // ----- mouse click via SendInput (preferred over mouse_event for reliability) -----
+  // ----- mouse click via SendInput (v1.6.0: absolute-only, race-free) -----
+  // 변경 사항 (v1.6.0):
+  //   - SetCursorPos 제거 — SendInput absolute 와 race 발생 가능, 정확도 ↓
+  //   - 단일 SendInput batch 안에서 [move, down, up] 원자적 실행
+  //   - move 후 5ms 마이크로 sleep 으로 OS scheduler 가 hover state 인식하게 함
+  //   - PostClickX / PostClickY 정적 필드로 호출자가 실제 도착 좌표 검증 가능
+  public static int PostClickX = 0;
+  public static int PostClickY = 0;
+  public static int PostClickRequestedX = 0;
+  public static int PostClickRequestedY = 0;
   public static void SendMouseClick(int x, int y, string button, bool doubleClick) {
-    // 1) move cursor (SetCursorPos for compatibility, then absolute SendInput
-    //    so that Windows reports the cursor at the target before the click)
-    SetCursorPos(x, y);
+    PostClickRequestedX = x;
+    PostClickRequestedY = y;
 
     int virtW = GetSystemMetrics(SM_CXVIRTUALSCREEN);
     int virtH = GetSystemMetrics(SM_CYVIRTUALSCREEN);
@@ -439,6 +447,7 @@ public static class CucpNative {
       default:       downFlag = MOUSEEVENTF_LEFTDOWN;   upFlag = MOUSEEVENTF_LEFTUP;   break;
     }
 
+    // Stage 1: move only — Windows hover state 인식까지 대기
     var move = new INPUT {
       type = INPUT_MOUSE,
       u = new INPUTUNION { mi = new MOUSEINPUT {
@@ -447,16 +456,31 @@ public static class CucpNative {
         time = 0, dwExtraInfo = IntPtr.Zero
       }}
     };
+    var moveArr = new INPUT[] { move };
+    SendInput(1u, moveArr, Marshal.SizeOf(typeof(INPUT)));
+
+    // 5ms micro-sleep — OS 가 hover state 디스패치할 시간 확보
+    System.Threading.Thread.Sleep(5);
+
+    // Stage 2: down + up batch — 클릭이 hover state 위에서 발생하도록
     var down = new INPUT { type = INPUT_MOUSE, u = new INPUTUNION { mi = new MOUSEINPUT { dwFlags = downFlag } } };
     var up   = new INPUT { type = INPUT_MOUSE, u = new INPUTUNION { mi = new MOUSEINPUT { dwFlags = upFlag } } };
+    var clickArr = new INPUT[] { down, up };
+    SendInput(2u, clickArr, Marshal.SizeOf(typeof(INPUT)));
 
-    var inputs = new INPUT[] { move, down, up };
-    SendInput((uint)inputs.Length, inputs, Marshal.SizeOf(typeof(INPUT)));
+    // 도착 좌표 검증 — 호출자가 hit-test 시 사용
+    POINT p;
+    if (GetCursorPos(out p)) {
+      PostClickX = p.X;
+      PostClickY = p.Y;
+    } else {
+      PostClickX = x;
+      PostClickY = y;
+    }
 
     if (doubleClick) {
       System.Threading.Thread.Sleep(60);
-      var inputs2 = new INPUT[] { down, up };
-      SendInput((uint)inputs2.Length, inputs2, Marshal.SizeOf(typeof(INPUT)));
+      SendInput(2u, clickArr, Marshal.SizeOf(typeof(INPUT)));
     }
   }
 

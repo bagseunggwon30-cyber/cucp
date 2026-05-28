@@ -134,13 +134,32 @@ function _Find-CliPath {
   }
   # 4) 개발 환경 fallback: Documents\Codex 하위에서 검증을 통과한 cli.mjs만
   #    Lite 등 잘못된 CLI는 _Validate-CliMjs 가 거부함.
+  # v1.6.0 perf: 재귀 walking 결과 캐시. 캐시 파일 없거나 stale 시에만 스캔.
   $devBase = Join-Path $env:USERPROFILE "Documents\Codex"
   if (Test-Path -LiteralPath $devBase) {
+    # 캐시 우선 — wrapper-cache 디렉터리에 cli-path.txt 가 있으면 그 경로 검증만
+    $cacheDir = Join-Path $env:TEMP "computer-use-control-plane\wrapper-cache"
+    $cliCacheFile = Join-Path $cacheDir "cli-path.txt"
+    if (Test-Path -LiteralPath $cliCacheFile) {
+      try {
+        $cached = (Get-Content -LiteralPath $cliCacheFile -Raw -Encoding UTF8).Trim()
+        if ($cached -and (_Validate-CliMjs $cached)) { return $cached }
+      } catch { }
+    }
+    # cache miss → 1회 재귀 스캔 후 결과를 캐시 파일에 저장
     $found = Get-ChildItem -LiteralPath $devBase -Recurse -Filter "cli.mjs" -ErrorAction SilentlyContinue |
       Where-Object { $_.FullName -match "src[/\\]cli\.mjs$" } |
       Sort-Object LastWriteTime -Descending
     foreach ($f in $found) {
-      if (_Validate-CliMjs $f.FullName) { return $f.FullName }
+      if (_Validate-CliMjs $f.FullName) {
+        try {
+          if (-not (Test-Path -LiteralPath $cacheDir)) {
+            New-Item -ItemType Directory -Path $cacheDir -Force | Out-Null
+          }
+          Set-Content -LiteralPath $cliCacheFile -Value $f.FullName -Encoding UTF8 -NoNewline -ErrorAction SilentlyContinue
+        } catch { }
+        return $f.FullName
+      }
     }
   }
   return $null
@@ -195,6 +214,241 @@ if (-not $Script:NativeHelperPath) {
 }
 
 # ============================================================================
+# v1.6.0 — Helper Persistent Server IPC
+# ============================================================================
+# cucp-helper-server.ps1 (named pipe server) 와의 JSON-line IPC 헬퍼.
+# wrapper 가 첫 호출 시 lock 파일 (helper.pid) 검사 → server 살아있으면 pipe,
+# 없거나 stale 이면 child PowerShell fallback. 같은 wrapper invocation 안에서
+# 여러 매크로가 helper 를 N회 호출할 때 cold-start 비용 (~500ms × N) 회피.
+#
+# 사용 흐름:
+#   1. _Read-LockSafely → lock JSON 안전 read (없으면 null)
+#   2. _Is-StaleLock → PID alive / mtime / pipe_name / SemVer 검사
+#   3. Invoke-HelperPipe → JSON-line request 전송 + response 수신
+#   4. Invoke-NativeHelper 가 위 헬퍼를 server-first 분기에서 사용
+# ============================================================================
+
+$Script:HelperLockPath = Join-Path $Script:AuditDir "helper.pid"
+$Script:HelperServerScript = Join-Path $PSScriptRoot "cucp-helper-server.ps1"
+$Script:_HelperPipeReqId = 0
+# server 가 직접 처리 가능한 action 화이트리스트 (cucp-helper-server.ps1 v1.6.0 의 _Dispatch 와 일치)
+$Script:HelperServerSupported = @("windows", "health", "focused", "modal-detect")
+
+function _Read-LockSafely {
+  # 결과: hashtable {pid, pipe_name, started_at, helper_version} 또는 $null
+  if (-not (Test-Path -LiteralPath $Script:HelperLockPath)) { return $null }
+  try {
+    $raw = Get-Content -LiteralPath $Script:HelperLockPath -Raw -Encoding UTF8
+    if (-not $raw) { return $null }
+    $obj = $raw | ConvertFrom-Json -ErrorAction Stop
+    return $obj
+  } catch {
+    return $null
+  }
+}
+
+function _Is-StaleLock {
+  param($Lock)
+  if (-not $Lock) { return $true }
+  # 1. PID alive 검증
+  try {
+    $proc = Get-Process -Id ([int]$Lock.pid) -ErrorAction SilentlyContinue
+    if (-not $proc) { return $true }
+  } catch { return $true }
+  # 2. mtime 검증 (24h margin)
+  try {
+    $started = [DateTime]::Parse("$($Lock.started_at)")
+    $age = (Get-Date).ToUniversalTime() - $started.ToUniversalTime()
+    if ($age.TotalHours -gt 24) { return $true }
+  } catch { return $true }
+  # 3. pipe_name 형식 검증
+  $expectedPipe = "cucp-helper-$($Lock.pid)"
+  if ("$($Lock.pipe_name)" -ne $expectedPipe) { return $true }
+  # 4. helper_version SemVer 검증
+  if ("$($Lock.helper_version)" -notmatch '^\d+\.\d+\.\d+$') { return $true }
+  return $false
+}
+
+function _Try-Delete-Lock {
+  if (Test-Path -LiteralPath $Script:HelperLockPath) {
+    try { Remove-Item -LiteralPath $Script:HelperLockPath -Force -ErrorAction SilentlyContinue } catch { }
+  }
+}
+
+function Get-HelperServerStatus {
+  # macro session helper-status 용. server up/down 둘 다 일관 envelope 반환.
+  $lock = _Read-LockSafely
+  if (-not $lock -or (_Is-StaleLock -Lock $lock)) {
+    return [pscustomobject]@{
+      schema = "cucp.helper-status/v1"
+      alive = $false
+      pid = $null
+      pipe_name = $null
+      started_at = $null
+      uptime_s = 0
+      request_count = 0
+      helper_version = $null
+    }
+  }
+  # server 살아있으면 health action 으로 추가 정보 가져옴
+  $extra = $null
+  try {
+    $resp = Invoke-HelperPipe -Action "health" -ArgsHash @{} -TimeoutMs 1500
+    if ($resp -and $resp.exit_code -eq 0) { $extra = $resp.result }
+  } catch { $extra = $null }
+  $upS = 0; $reqC = 0
+  if ($extra) {
+    if ($extra.uptime_s) { $upS = [int]$extra.uptime_s }
+    if ($extra.request_count) { $reqC = [int]$extra.request_count }
+  }
+  return [pscustomobject]@{
+    schema = "cucp.helper-status/v1"
+    alive = $true
+    pid = [int]$lock.pid
+    pipe_name = "$($lock.pipe_name)"
+    started_at = "$($lock.started_at)"
+    uptime_s = $upS
+    request_count = $reqC
+    helper_version = "$($lock.helper_version)"
+  }
+}
+
+function Invoke-HelperPipe {
+  # JSON-line client. server 가 살아있다고 가정 (호출자가 lock 검증 후 사용).
+  # request: {id, action, args, timeout_ms?, trace_id?}
+  # response: {id, exit_code, result, error, ...}
+  # 실패 시 throw — 호출자가 catch 후 child fallback 으로 처리.
+  param(
+    [Parameter(Mandatory=$true)][string]$Action,
+    [hashtable]$ArgsHash = @{},
+    [int]$TimeoutMs = 30000
+  )
+  $lock = _Read-LockSafely
+  if (-not $lock) { throw "helper_lock_missing" }
+  $pipeName = "$($lock.pipe_name)"
+  if (-not $pipeName) { throw "helper_pipe_name_missing" }
+  $client = New-Object System.IO.Pipes.NamedPipeClientStream(
+    ".", $pipeName,
+    [System.IO.Pipes.PipeDirection]::InOut,
+    [System.IO.Pipes.PipeOptions]::Asynchronous
+  )
+  $reader = $null
+  $writer = $null
+  try {
+    $connectTimeout = [Math]::Min(2000, $TimeoutMs)
+    $client.Connect($connectTimeout)
+    if (-not $client.IsConnected) { throw "pipe_connect_failed" }
+    $reader = New-Object System.IO.StreamReader($client, [System.Text.Encoding]::UTF8)
+    $writer = New-Object System.IO.StreamWriter($client, [System.Text.Encoding]::UTF8)
+    $writer.AutoFlush = $true
+    $Script:_HelperPipeReqId++
+    $reqId = $Script:_HelperPipeReqId
+    $req = [ordered]@{
+      id = $reqId
+      action = $Action
+      args = $ArgsHash
+      timeout_ms = $TimeoutMs
+    }
+    $line = $req | ConvertTo-Json -Compress -Depth 8
+    $writer.WriteLine($line)
+    # async ReadLine 으로 timeout 통제
+    $task = [System.Threading.Tasks.Task]::Run([System.Func[string]] { $reader.ReadLine() })
+    $waited = $task.Wait($TimeoutMs)
+    if (-not $waited) { throw "pipe_read_timeout" }
+    $respLine = $task.Result
+    if (-not $respLine) { throw "pipe_empty_response" }
+    $resp = $respLine | ConvertFrom-Json -ErrorAction Stop
+    if ($resp.id -ne $reqId) { throw "pipe_id_mismatch (req=$reqId, resp=$($resp.id))" }
+    return $resp
+  } finally {
+    try { if ($reader) { $reader.Close() } } catch { }
+    try { if ($writer) { $writer.Close() } } catch { }
+    try { $client.Close() } catch { }
+    try { $client.Dispose() } catch { }
+  }
+}
+
+function Start-HelperServer {
+  # idempotent — 이미 살아있는 server 가 있으면 그대로 reuse
+  param(
+    [int]$IdleTimeoutMs = 60000
+  )
+  $lock = _Read-LockSafely
+  if ($lock -and -not (_Is-StaleLock -Lock $lock)) {
+    return [pscustomobject]@{
+      status = "ok"
+      reused = $true
+      pid = [int]$lock.pid
+      pipe_name = "$($lock.pipe_name)"
+      started_at = "$($lock.started_at)"
+    }
+  }
+  if ($lock) { _Try-Delete-Lock }  # stale 정리
+  if (-not (Test-Path -LiteralPath $Script:HelperServerScript)) {
+    return [pscustomobject]@{
+      status = "error"
+      reason = "helper_server_script_missing"
+      path = $Script:HelperServerScript
+    }
+  }
+  $argList = @(
+    "-NoProfile", "-NoLogo", "-NonInteractive",
+    "-ExecutionPolicy", "Bypass",
+    "-File", $Script:HelperServerScript,
+    "-IdleTimeoutMs", "$IdleTimeoutMs"
+  )
+  $proc = Start-Process powershell.exe -ArgumentList $argList `
+    -WindowStyle Hidden -PassThru -ErrorAction Stop
+  # lock 등장 대기 (3s deadline, 50ms tick)
+  $deadline = (Get-Date).AddMilliseconds(3000)
+  while ((Get-Date) -lt $deadline) {
+    Start-Sleep -Milliseconds 50
+    $lock = _Read-LockSafely
+    if ($lock -and [int]$lock.pid -eq [int]$proc.Id -and -not (_Is-StaleLock -Lock $lock)) {
+      return [pscustomobject]@{
+        status = "ok"
+        reused = $false
+        pid = [int]$lock.pid
+        pipe_name = "$($lock.pipe_name)"
+        started_at = "$($lock.started_at)"
+      }
+    }
+  }
+  # 실패 → spawn 된 proc 정리
+  try { $proc.Kill() } catch { }
+  _Try-Delete-Lock
+  return [pscustomobject]@{
+    status = "error"
+    reason = "server_start_timeout"
+  }
+}
+
+function Stop-HelperServer {
+  param([switch]$Force)
+  $lock = _Read-LockSafely
+  if (-not $lock) {
+    return [pscustomobject]@{ status = "ok"; reason = "no_helper_running" }
+  }
+  $oldPid = [int]$lock.pid
+  if (-not (_Is-StaleLock -Lock $lock)) {
+    # graceful shutdown via pipe
+    try {
+      $resp = Invoke-HelperPipe -Action "shutdown" -ArgsHash @{} -TimeoutMs 1500
+    } catch { }
+    Start-Sleep -Milliseconds 200
+  }
+  if ($Force -or (Get-Process -Id $oldPid -ErrorAction SilentlyContinue)) {
+    try { Stop-Process -Id $oldPid -Force -ErrorAction SilentlyContinue } catch { }
+  }
+  _Try-Delete-Lock
+  return [pscustomobject]@{
+    status = "ok"
+    stopped_pid = $oldPid
+    forced = [bool]$Force
+  }
+}
+
+# ============================================================================
 # Invoke-NativeHelper - CUCP 자체 PowerShell helper 호출
 # ============================================================================
 # 외부 helper (windows-mcp, codex-win.ps1) 우회용. Win32 + UIA + Screenshot을
@@ -232,7 +486,8 @@ function Invoke-NativeHelper {
   # ==========================================================================
   param(
     [string[]]$ArgList,
-    [int]$TimeoutMs = 0
+    [int]$TimeoutMs = 0,
+    [switch]$ForceChild
   )
   if (-not $Script:NativeHelperPath) {
     return [pscustomobject]@{
@@ -241,6 +496,64 @@ function Invoke-NativeHelper {
       Raw = ""
       Err = "native_helper_missing"
       ElapsedMs = 0
+    }
+  }
+  # ==========================================================================
+  # v1.6.0 — Helper Persistent Server server-first 라우팅
+  # ==========================================================================
+  # ForceChild=true 또는 lock 없음/stale → 즉시 child 경로 (기존 동작 보존).
+  # lock valid + action 이 server whitelist 안 → pipe IPC 시도. 실패시 child fallback.
+  # 결과 envelope 에 route="pipe"|"child" 표기, 외부 ExitCode 는 99 (fallback) 노출 안 함.
+  # ==========================================================================
+  $ipcSw = [System.Diagnostics.Stopwatch]::StartNew()
+  $serverRouteAttempted = $false
+  if (-not $ForceChild -and -not $env:CUCP_FORCE_CHILD) {
+    $lock = _Read-LockSafely
+    if ($lock -and -not (_Is-StaleLock -Lock $lock)) {
+      # action 추출
+      $hAction = $null
+      for ($k = 0; $k -lt $ArgList.Count - 1; $k++) {
+        if ($ArgList[$k] -eq "-Action") { $hAction = "$($ArgList[$k+1])"; break }
+      }
+      if ($hAction -and ($Script:HelperServerSupported -contains $hAction)) {
+        $serverRouteAttempted = $true
+        # 옵션 → hashtable
+        $hArgs = @{}
+        $optKeys = @("Match","TargetMatch","TargetHwnd")
+        foreach ($oK in $optKeys) {
+          for ($k = 0; $k -lt $ArgList.Count - 1; $k++) {
+            if ($ArgList[$k] -eq "-$oK") { $hArgs[$oK] = "$($ArgList[$k+1])"; break }
+          }
+        }
+        $tm = $TimeoutMs
+        if ($tm -le 0) { $tm = $Script:InvokeTimeoutMs }
+        try {
+          $resp = Invoke-HelperPipe -Action $hAction -ArgsHash $hArgs -TimeoutMs $tm
+          $ipcSw.Stop()
+          if ($resp -and $resp.exit_code -ne 99) {
+            # 정상 응답 — pipe 경로로 envelope 구성
+            $exitMapped = [int]$resp.exit_code
+            $jsonObj = $resp.result
+            $rawJson = $jsonObj | ConvertTo-Json -Compress -Depth 12
+            return [pscustomobject]@{
+              ExitCode = $exitMapped
+              Json = $jsonObj
+              Raw = $rawJson
+              Err = if ($resp.error) { "$($resp.error)" } else { "" }
+              ElapsedMs = [int]$ipcSw.Elapsed.TotalMilliseconds
+              FromHotCache = $false
+              Route = "pipe"
+            }
+          }
+          # exit_code=99 → fallback_required, child 경로로 빠짐
+        } catch {
+          # pipe broken / timeout / id mismatch → child fallback
+          # stale 검사 한 번 더 (server 가 죽었을 수 있음)
+          $lock2 = _Read-LockSafely
+          if ($lock2 -and (_Is-StaleLock -Lock $lock2)) { _Try-Delete-Lock }
+          Write-WrapperLog -Message "PIPE FAILED ($($_.Exception.Message)) → child fallback for action=$hAction"
+        }
+      }
     }
   }
   # ==========================================================================
@@ -282,6 +595,7 @@ function Invoke-NativeHelper {
         Err = $null
         ElapsedMs = 0
         FromHotCache = $true
+        Route = "hot-cache"
       }
     } else {
       $Script:HotCacheStats.evictions++
@@ -373,6 +687,7 @@ function Invoke-NativeHelper {
       Err = $err
       ElapsedMs = [int]$sw.Elapsed.TotalMilliseconds
       FromHotCache = $false
+      Route = "child"
     }
   } catch {
     $sw.Stop()
@@ -382,6 +697,7 @@ function Invoke-NativeHelper {
       Raw = ""
       Err = $_.Exception.Message
       ElapsedMs = [int]$sw.Elapsed.TotalMilliseconds
+      Route = "child-error"
     }
   } finally {
     Remove-Item -LiteralPath $stdoutFile -Force -ErrorAction SilentlyContinue
@@ -12342,6 +12658,8 @@ function Invoke-MacroSession {
       $cacheCount = (Get-ChildItem -LiteralPath $Script:CacheDir -Filter "appshot-*.json" -ErrorAction SilentlyContinue).Count
       $pointPlanCacheCount = (Get-ChildItem -LiteralPath $Script:CacheDir -Filter "point-plan-*.json" -ErrorAction SilentlyContinue).Count
       $logSize = if (Test-Path $Script:WrapperLog) { (Get-Item $Script:WrapperLog).Length } else { 0 }
+      $hsStatus = $null
+      try { $hsStatus = Get-HelperServerStatus } catch { $hsStatus = $null }
       $info = [pscustomobject]@{
         cache_dir = $Script:CacheDir
         audit_dir = $Script:AuditDir
@@ -12353,12 +12671,58 @@ function Invoke-MacroSession {
         task_card_path = $Script:TaskCardPath
         task_card_exists = [bool](Test-Path -LiteralPath $Script:TaskCardPath)
         cache_seconds = $CacheSeconds
+        helper_server = $hsStatus
       }
-      [Console]::Out.WriteLine(($info | ConvertTo-Json))
+      [Console]::Out.WriteLine(($info | ConvertTo-Json -Depth 6))
+      return 0
+    }
+    "start-helper" {
+      # v1.6.0: helper persistent server spawn (idempotent)
+      $idleStr = _Read-OptValue -Rest $Rest -Name "--idle-timeout-ms"
+      $idleMs = 60000
+      if ($idleStr) { try { $idleMs = [int]$idleStr } catch { $idleMs = 60000 } }
+      $r = Start-HelperServer -IdleTimeoutMs $idleMs
+      if ($Brief) {
+        if ($r.status -eq "ok") {
+          $reused = if ($r.reused) { "reused" } else { "spawned" }
+          [Console]::Out.WriteLine("ok session start-helper $reused pid=$($r.pid) pipe=$($r.pipe_name)")
+        } else {
+          [Console]::Out.WriteLine("error session start-helper reason=$($r.reason)")
+        }
+      } else {
+        $payload = [ordered]@{ schema = "cucp.helper-server-start/v1" }
+        foreach ($p in $r.PSObject.Properties) { $payload[$p.Name] = $p.Value }
+        [Console]::Out.WriteLine(($payload | ConvertTo-Json -Depth 6))
+      }
+      if ($r.status -eq "ok") { return 0 } else { return 1 }
+    }
+    "stop-helper" {
+      $force = _Read-Switch -Rest $Rest -Name "--force"
+      $r = Stop-HelperServer -Force:$force
+      if ($Brief) {
+        [Console]::Out.WriteLine("ok session stop-helper stopped_pid=$($r.stopped_pid) forced=$($r.forced)")
+      } else {
+        $payload = [ordered]@{ schema = "cucp.helper-server-stop/v1" }
+        foreach ($p in $r.PSObject.Properties) { $payload[$p.Name] = $p.Value }
+        [Console]::Out.WriteLine(($payload | ConvertTo-Json -Depth 6))
+      }
+      return 0
+    }
+    "helper-status" {
+      $r = Get-HelperServerStatus
+      if ($Brief) {
+        if ($r.alive) {
+          [Console]::Out.WriteLine("ok session helper-status alive pid=$($r.pid) uptime_s=$($r.uptime_s) requests=$($r.request_count)")
+        } else {
+          [Console]::Out.WriteLine("ok session helper-status not_running")
+        }
+      } else {
+        [Console]::Out.WriteLine(($r | ConvertTo-Json -Depth 6))
+      }
       return 0
     }
     default {
-      Write-Notice -Level "ERROR" -Message "session 하위 명령: clear-cache, info"
+      Write-Notice -Level "ERROR" -Message "session 하위 명령: clear-cache, info, start-helper, stop-helper, helper-status"
       return 1
     }
   }
