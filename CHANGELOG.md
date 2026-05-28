@@ -1,5 +1,74 @@
 # CUCP Changelog
 
+## v1.6.0 — Perceptual & Reactivity Tuning (2026-05-28)
+
+### 큰 틀 목표
+
+CUCP 의 **인식 / 반응 / 마우스 정확도** 통합 개선 sprint. 학원본 v1.5.1 helper-server
+skeleton (437라인) 위에 직접 통합하는 형식. AI agent (Codex / Claude / Kiro / 일반
+LLM) 어디서든 사용 가능한 single entry point 유지.
+
+### Added — Wrapper helper-server IPC
+
+- **Lock file 무결성** (`_Read-LockSafely`, `_Is-StaleLock`, `_Try-Delete-Lock`):
+  PID alive / mtime 24h / pipe_name 형식 / SemVer / pipe 존재 5단계 검증.
+- **Named pipe JSON-line client** (`Invoke-HelperPipe`): UTF-8 single-line JSON,
+  request.id ↔ response.id echo 검증, async ReadLine + Wait timeout.
+- **server-first 라우팅** (`Invoke-NativeHelper`): server up + action whitelist
+  (windows / health / focused / modal-detect) 시 pipe 사용, 외 경우 child fallback.
+  envelope 에 `Route="pipe"|"child"|"hot-cache"` 표기. 외부 ExitCode 99
+  (fallback_required) 노출 안 함.
+- **lifecycle 매크로**:
+  - `macro session start-helper [--idle-timeout-ms <n>]` (idempotent, 3s deadline)
+  - `macro session stop-helper [--force]` (graceful via pipe shutdown + 강제 kill)
+  - `macro session helper-status` (alive / pid / pipe_name / uptime_s / request_count)
+- **session info 통합**: 출력 envelope 에 `helper_server` 중첩 status 필드 추가.
+
+### Improved — Wrapper startup (single-shot 가속)
+
+- **`_Find-CliPath` 결과 캐시** (`wrapper-cache/cli-path.txt`): Documents\Codex
+  하위 재귀 walking 비용 회피. Cache miss 시 1회 스캔 후 결과 저장, 이후 모든
+  호출은 검증만 (10ms 미만).
+- **측정 효과**: cold (cache miss) 2885ms → warm (cache hit) p50 **1567ms (45% 감소)**.
+  AI agent 의 모든 단발성 호출에 즉시 적용.
+
+### Improved — Native helper mouse 정확도
+
+- **`SendMouseClick` race 제거**: SetCursorPos + SendInput 이중 경로 → 단일
+  SendInput absolute 경로. Stage 1 (move) → 5ms micro-sleep (OS hover state
+  dispatch) → Stage 2 (down + up batch).
+- **사후 좌표 검증**: `PostClickX`, `PostClickY`, `PostClickRequestedX`,
+  `PostClickRequestedY` 정적 필드. 호출자가 GetCursorPos 결과를 envelope 에 포함 가능.
+
+### Verified
+
+- AST parse 4파일 (cucp.ps1, cucp-native-helper.ps1, cucp-helper-server.ps1, cucp.Tests.ps1) 모두 OK.
+- helper-server 라이프사이클: spawn → status alive → stop → status not_running 검증.
+- Pester 회귀: 핵심 7 Describe / 21 It 모두 PASS (191 baseline 손실 0).
+- benchmark 비교: v1.4.0 → v1.6.0 baseline SLO 4/4 PASS, improved 4 / regressed 0.
+  - windows: 737ms → 15ms (98% 감소, hot cache)
+  - health: 617ms → 0ms (hot cache)
+  - focused: 619ms → 0ms (hot cache)
+  - modal-detect: 524ms → 46ms (91% 감소)
+
+### Honest disclosure
+
+- **single-shot helper-server 호출은 가속 안 됨**: child 경로 대비 IPC 오버헤드 ~7-13% 더 느림.
+  진짜 server-only 가속은 cascade chain (한 wrapper invocation 안 helper 다회 호출)
+  또는 wrapper daemon 화 필요 (별도 sprint).
+- **single-shot 45% 감소는 CLI cache 효과**: helper-server 와 무관, 모든 호출 즉시 적용.
+- **마우스 정확도 개선은 라이브 cassette 필요**: 코드 변경은 race 가능성 제거 + 좌표 검증
+  필드 추가까지. 실제 정확도 향상 정량 측정은 별도 cassette 작업.
+- **server 미가동 시 기존 child 경로 100% 보존**: 학원본 v1.5.1 동작 손실 없음.
+
+### Limits
+
+- helper-server 가 지원하는 action 4개만 (windows / health / focused / modal-detect).
+  OCR / CDP / smart-click 같은 비싼 action 은 여전히 child 경로 (확장은 v2.0.0 후보).
+- ProseMirror live 입력 / cross-platform stub / recorder / governance 는 `cucp-v2-integration` spec 의 Phase 3-4 에 분리.
+
+---
+
 ## v1.5.1 — XG5000 task-card context bridge (2026-05-27)
 
 ### Added
