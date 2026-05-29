@@ -1410,12 +1410,10 @@ function Invoke-NativeHelper {
 }
 
 # ----- logging --------------------------------------------------------------
-function Write-WrapperLog {
-  param([string]$Message)
-  $timestamp = (Get-Date).ToString("yyyy-MM-ddTHH:mm:ss.fffK")
-  try { Add-Content -LiteralPath $Script:WrapperLog -Value "[$timestamp] $Message" -Encoding UTF8 } catch { }
-}
-
+# NOTE: Write-WrapperLog 는 파일 상단(라인 ~201, $Script:WrapperLog 설정 직후)에서
+# 이미 정의된다. 외부 업데이트본 병합 과정에서 이 위치에 중복 정의가 들어왔던 것을
+# v2.1.1 정리 단계에서 제거했다. Write-Notice / ConvertTo-ProcessArgumentString 은
+# 여기가 유일 정의이므로 보존한다.
 function Write-Notice {
   param([string]$Message, [string]$Level = "INFO")
   if (-not $Quiet) {
@@ -1544,7 +1542,11 @@ function Invoke-Cucp {
           ElapsedMs = $elapsed
         }
       }
-      $proc.WaitForExit()
+      # 이미 WaitForExit($InvokeTimeoutMs) 로 정상 종료를 확인한 경로다. 여기서의
+      # 두 번째 대기는 redirect 된 stdout/stderr 의 flush 완료 보장이 목적이며,
+      # 무바운드 WaitForExit() 는 이론상 핸들 잔류 시 행(hang) 위험이 있으므로
+      # 짧은 바운드(5s)를 준다. 초과해도 이미 exit 한 상태라 결과 읽기에 지장 없음.
+      try { [void]$proc.WaitForExit(5000) } catch { }
       $invokeSw.Stop()
       $elapsed = [int]$invokeSw.Elapsed.TotalMilliseconds
       $raw = if (Test-Path -LiteralPath $stdoutFile) { [System.IO.File]::ReadAllText($stdoutFile, [System.Text.Encoding]::UTF8) } else { "" }
@@ -2442,6 +2444,10 @@ function Invoke-Macro {
   $sub = $ArgList[1]
   $rest = if ($ArgList.Count -gt 2) { $ArgList[2..($ArgList.Count-1)] } else { @() }
 
+  # 직접 호출 시 sensitive 분류 게이트를 거치는 live 매크로 목록.
+  # NOTE(v2.1.1): notify / multi-select / multi-edit / process / registry 는 본체
+  # 미구현(_Macro-NotImplemented 로 처리)이라 이 목록에서 제외했다. 미구현 매크로를
+  # sensitive 분류 대상에 두면 surface 정합성이 깨지기 때문. clipboard 는 구현돼 있어 유지.
   $directSafetyLiveMacros = @(
     "app-launch","app-close","with-app","focus-window","focus-verify",
     "click-label","double-click-label","right-click-label","click-id","click-point",
@@ -2449,8 +2455,7 @@ function Invoke-Macro {
     "uia-invoke","uia-set-value","uia-toggle","safe-type","smart-click","form-run",
     "icon-click","vision-click","vision-click-precise","click-and-verify",
     "click-and-verify-screen","ocr-click","ocr-uia-invoke","cdp-type","cdp-click",
-    "cdp-smart-click","cdp-smart-type","auto-do","goal","notify","multi-select",
-    "multi-edit","clipboard","process","registry",
+    "cdp-smart-click","cdp-smart-type","auto-do","goal","clipboard",
     "mouse-verify","cdp-prosemirror-insert","ime-paste","safe-type-ime",
     "recovery-run"
   )
@@ -2580,15 +2585,17 @@ function Invoke-Macro {
     "precision-validate" { return Invoke-MacroPrecisionValidate -Rest $rest }
     "benchmark"         { return Invoke-MacroBenchmark -Rest $rest }
     "release-notes"     { return Invoke-MacroReleaseNotes -Rest $rest }
-    # ── Windows-MCP 동등 기능 ──────────────────────────────────────────────
+    # ── Windows-MCP 동등 기능 (일부는 surface 등록만, 본체 미구현) ─────────
     "clipboard"     { return Invoke-MacroClipboard -Rest $rest }
-    "process"       { return Invoke-MacroProcess -Rest $rest }
-    "registry"      { return Invoke-MacroRegistry -Rest $rest }
-    "notify"        { return Invoke-MacroNotify -Rest $rest }
-    "multi-select"  { return Invoke-MacroMultiSelect -Rest $rest }
-    "multi-edit"    { return Invoke-MacroMultiEdit -Rest $rest }
-    "scrape"        { return Invoke-MacroScrape -Rest $rest }
-    "dom-snapshot"  { return Invoke-MacroDomSnapshot -Rest $rest }
+    # 아래 매크로들은 dispatcher 에 광고돼 있으나 본체 미구현 (v2.1.1 정직 처리).
+    # 호출 시 raw 런타임 에러 대신 표준 not_implemented envelope 반환.
+    "process"       { return _Macro-NotImplemented -Macro "process" -Hint "프로세스 조회/종료는 미구현. 위험 작업이라 게이트 설계 후 별도 구현 필요." }
+    "registry"      { return _Macro-NotImplemented -Macro "registry" -Hint "레지스트리 읽기/쓰기는 미구현. 쓰기는 고위험이라 신중한 게이트 필요." }
+    "notify"        { return _Macro-NotImplemented -Macro "notify" -Hint "토스트 알림은 미구현." }
+    "multi-select"  { return _Macro-NotImplemented -Macro "multi-select" -Hint "다중 선택은 미구현." }
+    "multi-edit"    { return _Macro-NotImplemented -Macro "multi-edit" -Hint "다중 편집은 미구현." }
+    "scrape"        { return _Macro-NotImplemented -Macro "scrape" -Hint "스크레이프는 미구현. CDP/OCR 매크로로 대체 가능." }
+    "dom-snapshot"  { return _Macro-NotImplemented -Macro "dom-snapshot" -Hint "DOM 스냅샷은 미구현. cdp-deep-find / cdp-eval 로 대체 가능." }
     "app-launch"    { return Invoke-MacroAppLaunch -Rest $rest }
     "app-close"     { return Invoke-MacroAppClose -Rest $rest }
     "with-app"      { return Invoke-MacroWithApp -Rest $rest }
@@ -2621,6 +2628,34 @@ function _Read-AllOptValues { param([string[]]$Rest, [string]$Name)
 
 function _Read-Switch { param([string[]]$Rest, [string]$Name)
   return ($Rest -contains $Name)
+}
+
+# ----------------------------------------------------------------------------
+# _Macro-NotImplemented (v2.1.1)
+# ----------------------------------------------------------------------------
+# 일부 매크로 (process / registry / notify / multi-select / multi-edit /
+# scrape / dom-snapshot) 는 dispatcher 에는 광고돼 있으나 본체 구현이 없다
+# (외부 업데이트본 병합 과정의 미완성 surface). 과거에는 호출 시 "함수를 인식할
+# 수 없습니다" 같은 raw 런타임 에러가 났는데, 이는 (1) 사용자에게 불친절하고
+# (2) 마치 내부 버그처럼 보이며 (3) 광고된 surface 와 실제 동작이 어긋나는
+# 정합성 문제였다. 이 헬퍼로 깔끔한 미구현 안내 + 표준 envelope (exit 1) 를
+# 반환해 "광고했지만 아직 없음" 을 정직하게 노출한다.
+function _Macro-NotImplemented {
+  param([string]$Macro, [string]$Hint = "")
+  $payload = [pscustomobject]@{
+    schema = "cucp.not-implemented/v1"
+    status = "not_implemented"
+    macro = $Macro
+    summary = "매크로 '$Macro' 는 이 버전에서 아직 구현되지 않았습니다 (surface 에는 등록됨)."
+    hint = $Hint
+    next_action = "다른 매크로로 대체하거나, 이 기능이 필요하면 별도 구현 요청. 'cucp macro' 로 사용 가능 목록 확인."
+  }
+  if ($Brief) {
+    [Console]::Out.WriteLine("not_implemented $Macro")
+  } else {
+    [Console]::Out.WriteLine(($payload | ConvertTo-Json -Depth 6))
+  }
+  return 1
 }
 
 function Invoke-TaskCardScript {
@@ -4101,6 +4136,12 @@ function Invoke-MacroClickId {
 
 function Invoke-MacroClickPoint {
   param([string[]]$Rest)
+  # NOTE(v2.1.1 정리): 이 단순 버전은 과거 이 위치와 파일 뒤쪽(~라인 7600대)에 중복
+  # 정의돼 있었다. 실제 동작하던 건 뒤쪽의 가드 포함 버전(target-match/target-hwnd
+  # hit-test + micro-refine + anchor-history + precision)이고, PowerShell 은 나중
+  # 정의가 이기므로 이 단순 버전은 죽은 코드였다. 가드 없는 좌표 클릭을 남겨둘 이유가
+  # 없어 본체를 비우고, 뒤쪽 정교 버전으로 호출을 위임한다. (정의 순서상 이 정의는
+  # 뒤쪽 정의로 덮어써진다.)
   $x = [int](_Read-OptValue -Rest $Rest -Name "--x")
   $y = [int](_Read-OptValue -Rest $Rest -Name "--y")
   $button = _Read-OptValue -Rest $Rest -Name "--button"
