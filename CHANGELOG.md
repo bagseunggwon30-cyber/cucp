@@ -1,5 +1,49 @@
 # CUCP Changelog
 
+## v2.3.0 - Daemon serve: single-shot 가속 정공법 (2026-05-30)
+
+### 배경 (실측으로 밝힌 진실)
+
+`benchmark` 의 warm p50 가 30~40ms 라 빠른 것처럼 보였지만, AI agent 의 실제 호출
+패턴인 **single-shot (매번 새 PowerShell + wrapper 14,800줄 파싱 + .NET/UIA 로드)**
+은 ~2초였다. helper-server 가 떠 있어도 이 비용은 안 줄어든다 — helper-server 는
+child spawn 비용(~500ms)만 줄이지 PowerShell/wrapper cold-start(~1.5s)는 못 줄이기
+때문. **autostart 를 켜도 single-shot 은 안 빨라진다는 것을 실측으로 확인**했다.
+
+### Added — `macro daemon serve`
+
+- wrapper 를 **한 번만 로드한 상주 프로세스**가 stdin 으로 JSON-line 명령을 받아
+  처리하고 stdout 으로 응답. 2번째 명령부터는 파싱/로드 비용이 0 이므로 single-shot
+  ~2000ms → **31~365ms** (실측, windows #2 = 31ms).
+- **sentinel 프로토콜**: 매크로 stdout 을 `[Console]::SetOut` 으로 가로채는 방식은
+  child-spawn 매크로(native helper)와 PowerShell 5.x 에서 데드락/race 를 일으켜
+  실측 후 폐기. 대신 응답을 `<<<CUCP-RESP id=N>>>` ... `<<<CUCP-END id=N exit=C ms=M>>>`
+  sentinel 로 감싸 raw stdout 에 흘려보낸다. 클라이언트는 두 sentinel 사이를 매크로
+  출력으로, END 줄에서 exit/elapsed 를 파싱.
+- **제어 명령**: `{"action":"ping"}` (헬스 체크), `{"action":"shutdown"}` (정상 종료),
+  stdin EOF 시 자동 종료.
+- **`--max-commands N`** (기본 1000): 무한 상주 방지.
+- **live 분리 안전 설계**: live 허용은 daemon 시작 시 `-AllowLiveControl` 로 고정
+  (PowerShell param 스위치라 런타임 토글 불가). read-only daemon 과 live daemon 을
+  명시 분리해 "실수로 띄운 daemon 이 조작까지 한다" 를 구조적으로 차단. 각 명령은
+  `Invoke-Macro` 를 그대로 재호출하므로 모든 안전 게이트 동일 적용.
+
+### Verified
+
+- daemon 격리 테스트: ping/ping/shutdown 루프 정상, windows #2 = 31ms, JSON 출력 온전성 OK (wc=7).
+- 전체 회귀: **Pester 190/190**, **contract-verify 8/8**, **AST 6/6**.
+
+### Honest disclosure
+
+- daemon 내에서도 `version` 같이 외부 node(cli backend)를 호출하는 매크로는 여전히
+  느리다 (node 프로세스를 매번 새로 띄움). daemon 가속은 PowerShell-native 매크로
+  (windows/health/modal-detect/find-label 등)에서 가장 크다.
+- 첫 명령(cold)은 여전히 .NET/UIA 로드로 300~800ms. 가속은 2번째 명령부터.
+- daemon 클라이언트는 stdout **과 stderr 를 모두 redirect/drain** 해야 한다. stderr
+  버퍼가 차면 블록될 수 있음 (Write-Notice 가 stderr 로 나가는 경우).
+
+---
+
 ## v2.1.1 - XG5000 spec-board merge (2026-05-29)
 
 ### Added

@@ -6,7 +6,7 @@
 
 **AI 에이전트가 Windows 데스크톱을 안전하게 관찰하고 조작하기 위한 control plane**
 
-[![Version](https://img.shields.io/badge/version-v2.1.1-blue.svg)](https://github.com/bagseunggwon30-cyber/cucp/releases/tag/v2.1.1)
+[![Version](https://img.shields.io/badge/version-v2.3.0-blue.svg)](https://github.com/bagseunggwon30-cyber/cucp/releases/tag/v2.3.0)
 [![Platform](https://img.shields.io/badge/platform-Windows%2010%2F11-0078D4.svg?logo=windows)](https://learn.microsoft.com/windows/)
 [![PowerShell](https://img.shields.io/badge/PowerShell-5.1%2B-5391FE.svg?logo=powershell)](https://learn.microsoft.com/powershell/)
 [![Tests](https://img.shields.io/badge/Pester-190%2F190%20passing-brightgreen.svg)](#-검증-상태)

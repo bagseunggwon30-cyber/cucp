@@ -175,7 +175,8 @@ $Script:InvokeTimeoutMs = [Math]::Max(1000, $InvokeTimeoutMs)
 # Single source of truth for skill (wrapper) version. CHANGELOG/README 와 동기화.
 # Get-CucpVersionReport 가 이 상수 + cli/package.json + helper-server 헤더를 합쳐
 # `cucp.version/v1` envelope 으로 통합 출력.
-$Script:SkillVersion = "2.1.1"
+# v2.3.0: daemon serve (single-shot 가속 정공법) + autostart(v2.2.0) 포함.
+$Script:SkillVersion = "2.3.0"
 
 # ----- platform detection (v1.9.0 honest stub) -----------------------------
 # CUCP 의 actuation / OCR / UIA 는 Windows 에 종속 (Windows.Media.Ocr, P/Invoke,
@@ -14701,11 +14702,129 @@ function Invoke-MacroDaemon {
       }
       return 0
     }
+    "serve" {
+      return Invoke-MacroDaemonServe -Rest $Rest
+    }
     default {
-      Write-Notice -Level "ERROR" -Message "daemon 하위 명령: batch --file <commands.json> [--auto-start-helper]"
+      Write-Notice -Level "ERROR" -Message "daemon 하위 명령: batch --file <commands.json> [--auto-start-helper] | serve [--max-commands N] [--idle-timeout-ms N]"
       return 1
     }
   }
+}
+
+# ----------------------------------------------------------------------------
+# macro daemon serve  (v2.3.0 — single-shot 가속 정공법)
+# ----------------------------------------------------------------------------
+# 문제: single-shot 호출(매번 새 PowerShell)이 ~2초. 그 2초의 대부분은 helper
+#       child spawn 이 아니라 "PowerShell 실행 + wrapper 14,800줄 파싱 + .NET/UIA
+#       assembly 로드" 다. helper-server 가 떠 있어도 이 비용은 안 줄어든다
+#       (실측 확인). 따라서 진짜 해법은 wrapper 자체를 한 번만 로드한 상주
+#       프로세스가 명령을 실시간으로 받아 처리하는 것.
+#
+# 동작: stdin 에서 JSON-line 한 줄 = 명령 하나. stdout 으로 JSON-line 한 줄 = 응답.
+#       wrapper 는 이미 메모리에 로드돼 있으므로 2번째 명령부터는 파싱/로드 비용 0.
+#       각 명령은 Invoke-Macro 를 그대로 재호출 → 모든 안전 게이트 동일 적용.
+#
+# 안전 설계:
+#   - live 허용은 daemon 시작 시 -AllowLiveControl 로 고정된다 (PowerShell param
+#     스위치라 런타임 토글 불가). read-only daemon 과 live daemon 을 명시 분리 →
+#     "실수로 띄운 daemon 이 조작까지 한다" 를 구조적으로 차단.
+#   - 각 매크로의 stdout 직접 출력([Console]::Out.WriteLine)을 StringWriter 로
+#     가로채 캡처한 뒤 원래 stdout 으로 복원. 응답 JSON 의 stdout 필드에 담는다.
+#   - --max-commands / --idle-timeout-ms 로 무한 상주 방지 (자원 누수 차단).
+#
+# 프로토콜:
+#   요청: {"id":1,"macro":"windows","args":["--json-only"]}
+#         {"action":"ping"}  /  {"action":"shutdown"}
+#   응답: {"id":1,"exit_code":0,"stdout":"...","elapsed_ms":42}
+#         {"action":"ping","ok":true,"live":false,"served":3}
+# ----------------------------------------------------------------------------
+function Invoke-MacroDaemonServe {
+  param([string[]]$Rest)
+  $maxCommands = [int](_Read-OptValue -Rest $Rest -Name "--max-commands")
+  if ($maxCommands -le 0) { $maxCommands = 1000 }
+  $idleTimeoutMs = [int](_Read-OptValue -Rest $Rest -Name "--idle-timeout-ms")
+  if ($idleTimeoutMs -le 0) { $idleTimeoutMs = 1800000 }  # 정보용 (기본 30분)
+
+  $stdin = [Console]::In
+  $served = 0
+
+  # ready 신호 (호출자가 daemon 기동 완료를 알 수 있게). live 모드 여부 노출.
+  $ready = [ordered]@{
+    schema = "cucp.daemon-serve/v1"
+    status = "ready"
+    live = [bool]$AllowLiveControl
+    pid = $PID
+    max_commands = $maxCommands
+    protocol = "sentinel"
+  }
+  [Console]::Out.WriteLine(($ready | ConvertTo-Json -Compress -Depth 5))
+  [Console]::Out.Flush()
+
+  while ($served -lt $maxCommands) {
+    # blocking ReadLine. 호출자가 shutdown 을 보내거나 stdin 을 닫으면(EOF) 종료.
+    $line = $stdin.ReadLine()
+    if ($null -eq $line) { break }                    # stdin EOF
+    $line = $line.Trim()
+    if ($line -eq "") { continue }
+
+    $req = $null
+    try { $req = $line | ConvertFrom-Json -ErrorAction Stop } catch {
+      [Console]::Out.WriteLine((@{ schema="cucp.daemon-serve/v1"; status="error"; reason="bad_json" } | ConvertTo-Json -Compress))
+      [Console]::Out.Flush(); continue
+    }
+
+    # 제어 명령 (action) 우선 처리
+    if ($req.action) {
+      if ("$($req.action)" -eq "shutdown") {
+        [Console]::Out.WriteLine((@{ schema="cucp.daemon-serve/v1"; status="shutdown"; served=$served } | ConvertTo-Json -Compress))
+        [Console]::Out.Flush(); break
+      }
+      if ("$($req.action)" -eq "ping") {
+        [Console]::Out.WriteLine((@{ schema="cucp.daemon-serve/v1"; action="ping"; ok=$true; live=[bool]$AllowLiveControl; served=$served } | ConvertTo-Json -Compress))
+        [Console]::Out.Flush(); continue
+      }
+    }
+
+    $macroName = "$($req.macro)"
+    $reqId = "$($req.id)"
+    if (-not $macroName) {
+      [Console]::Out.WriteLine((@{ schema="cucp.daemon-serve/v1"; id=$req.id; status="error"; reason="no_macro" } | ConvertTo-Json -Compress))
+      [Console]::Out.Flush(); continue
+    }
+    $macroArgs = @()
+    if ($req.args) { $macroArgs = @($req.args | ForEach-Object { "$_" }) }
+
+    # ----- sentinel 프로토콜 -----
+    # SetOut 캡처는 child-spawn 매크로(native helper)와 PowerShell 5.x 에서 충돌해
+    # 데드락/race 를 일으킨다(실측). 그래서 매크로의 stdout 을 가로채지 않고, 응답을
+    # BEGIN/END sentinel 로 감싸 raw stdout 에 그대로 흘려보낸다. 클라이언트는 두
+    # sentinel 사이를 매크로 출력으로, END 줄에서 exit/elapsed 를 파싱한다.
+    #   <<<CUCP-RESP id=ID>>>
+    #   ...매크로 stdout (여러 줄 가능)...
+    #   <<<CUCP-END id=ID exit=CODE ms=ELAPSED>>>
+    $exitCode = 0
+    $cmdSw = [System.Diagnostics.Stopwatch]::StartNew()
+    [Console]::Out.WriteLine("<<<CUCP-RESP id=$reqId>>>")
+    [Console]::Out.Flush()
+    try {
+      $argList = @("macro", $macroName) + $macroArgs
+      $code = Invoke-Macro -ArgList $argList     # 매크로가 직접 [Console]::Out 으로 출력
+      if ($null -eq $code) { $code = 0 }
+      if ($code -is [array]) { $code = $code[-1] }
+      if ($code -isnot [int]) { try { $code = [int]$code } catch { $code = 0 } }
+      $exitCode = $code
+    } catch {
+      $exitCode = 1
+      [Console]::Out.WriteLine((@{ schema="cucp.daemon-serve/v1"; error="$($_.Exception.Message)" } | ConvertTo-Json -Compress))
+    }
+    $cmdSw.Stop()
+    [Console]::Out.Flush()
+    [Console]::Out.WriteLine("<<<CUCP-END id=$reqId exit=$exitCode ms=$([int]$cmdSw.Elapsed.TotalMilliseconds)>>>")
+    [Console]::Out.Flush()
+    $served++
+  }
+  return 0
 }
 
 # ----------------------------------------------------------------------------
