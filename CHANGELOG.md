@@ -1,5 +1,22 @@
 # CUCP Changelog
 
+## v2.1.1 - XG5000 spec-board merge (2026-05-29)
+
+### Added
+
+- Integrated the v1.5.2 XG5000 `spec-board` package without downgrading the v2.1.0 wrapper.
+- Added `macro spec-board open|show|ensure|path|check|uncheck|ladder|markdown|clear`.
+- Added `scripts/cucp-spec-board.ps1` for an XG5000 project spec / checklist board.
+- Added `app-profile` auto-loading of `spec_board` for PLC/SCADA-like windows.
+- Added nested Codex skill `skills/xg5000-ladder-diagnostician/` with deterministic ladder diagnosis helper script.
+
+### Verified
+
+- AST parse for `scripts/cucp.ps1`, `scripts/cucp-native-helper.ps1`, `scripts/cucp-helper-server.ps1`, and `scripts/cucp-spec-board.ps1`.
+- Smoke commands for `cucp version`, `macro spec-board ensure`, and `macro spec-board ladder`.
+
+---
+
 ## v2.1.0 — Option B + Reliability + Enterprise (2026-05-29)
 
 ### 큰 틀 목표

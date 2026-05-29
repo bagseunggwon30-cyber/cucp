@@ -41,3 +41,7 @@ credentials/
 tests/_*.ps1
 tests/scratch-*.ps1
 *.pester-out
+
+# v2.1.x: agent temp diagnostic scripts (dot prefix) + pester output cache (do not commit)
+tests/.*.ps1
+tests/.*.txt

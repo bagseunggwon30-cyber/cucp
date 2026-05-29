@@ -1,6 +1,6 @@
 ---
 name: cucp-computer-use
-description: Use the local CUCP (Computer Use Control Plane) CLI from any Codex / Claude / Kiro project to observe, ground, and operate the user's Windows desktop at Claude Computer Use grade. Single entry point is `scripts/cucp.ps1`. Trigger on cucp, CUP, computer use, computer-use, Windows control, desktop control, appshot, snapshot, live benchmark, desktop benchmark, screen control, GUI automation, PC/app control, "컴퓨터 유즈", "컴퓨터 사용", "컴퓨터 조작", "내 컴퓨터 조작", "내 컴퓨터를 조작", "내 PC 조작", "앱 조작", "윈도우 조작", "화면 조작", "데스크톱 자동화", "자동화 실행", "GUI 자동화", "라벨 클릭", "버튼 클릭해줘", or whenever the user asks Codex to inspect, click, type, drag, scroll, switch apps, follow a goal, or autonomously operate the local Windows desktop. v2.1.0 macros (full surface): version, daemon, mouse-verify, cdp-prosemirror-insert, cdp-deep-find, modal-detect, recovery-plan, recovery-run, precision-validate, benchmark, release-notes, ime-paste, safe-type-ime, recorder, audit-summary, policy-check, task-card.
+description: Use the local CUCP (Computer Use Control Plane) CLI from any Codex / Claude / Kiro project to observe, ground, and operate the user's Windows desktop at Claude Computer Use grade. Single entry point is `scripts/cucp.ps1`. Trigger on cucp, CUP, computer use, computer-use, Windows control, desktop control, appshot, snapshot, live benchmark, desktop benchmark, screen control, GUI automation, PC/app control, "컴퓨터 유즈", "컴퓨터 사용", "컴퓨터 조작", "내 컴퓨터 조작", "내 컴퓨터를 조작", "내 PC 조작", "앱 조작", "윈도우 조작", "화면 조작", "데스크톱 자동화", "자동화 실행", "GUI 자동화", "라벨 클릭", "버튼 클릭해줘", or whenever the user asks Codex to inspect, click, type, drag, scroll, switch apps, follow a goal, or autonomously operate the local Windows desktop. v2.1.1 macros (full surface): version, daemon, mouse-verify, cdp-prosemirror-insert, cdp-deep-find, modal-detect, recovery-plan, recovery-run, precision-validate, benchmark, release-notes, ime-paste, safe-type-ime, recorder, audit-summary, policy-check, task-card, spec-board.
 ---
 
 # CUCP Computer Use (Claude-grade)
@@ -67,6 +67,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File C:\Users\K\.codex\skills\cuc
 & <wrapper> macro app-profile --match "Chrome" --label "Send" --label "Subject" --auto-probe  # read-only app profile and capability probes
 & <wrapper> macro task-card open                # XG5000/XP-Builder devices/requirements card
 & <wrapper> macro task-card show                # read current task-card JSON for planning
+& <wrapper> macro spec-board open               # XG5000 project spec/checklist board
+& <wrapper> macro spec-board ladder             # deterministic ladder draft from spec-board
 & <wrapper> macro workflow-plan --step "macro hit-test --x 1200 --y 720 --fast" --step "macro form-plan --field Message=hello"  # read-only multi-step workflow plan
 & <wrapper> macro workflow-run --step "macro hit-test --x 1200 --y 720 --fast" --step "macro windows"  # run read-only workflow without live control
 & <wrapper> macro workflow-run --observe-after-step --step "macro hit-test --x 1200 --y 720 --fast"  # execute read-only step, then capture a cheap window observation

@@ -1,0 +1,8 @@
+interface:
+  display_name: "XG5000 Ladder Diagnostician"
+  short_description: "Diagnoses and teaches LS XG5000 ladder logic issues."
+  brand_color: "#2563EB"
+  default_prompt: "Use $xg5000-ladder-diagnostician to diagnose this XG5000 ladder issue and explain why it works or fails."
+
+policy:
+  allow_implicit_invocation: true

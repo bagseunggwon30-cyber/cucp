@@ -54,7 +54,10 @@ function _Save-Cassette {
     if (-not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
     $stamp = (Get-Date).ToString("yyyyMMdd-HHmmss")
     $path = Join-Path $dir ($Name + '-' + $stamp + '.json')
-    Set-Content -LiteralPath $path -Value $Content -Encoding UTF8
+    # BOM 없는 UTF-8 로 저장. PowerShell 5.x 의 `Set-Content -Encoding UTF8` 는 BOM 을
+    # 붙여서 xg5000-evidence 의 no_utf8_bom 계약 검사를 깨뜨린다 (회귀 방지).
+    $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+    [System.IO.File]::WriteAllText($path, $Content, $utf8NoBom)
     Write-Host ('saved cassette: ' + $path)
     return $path
 }

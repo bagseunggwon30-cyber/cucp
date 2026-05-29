@@ -6,7 +6,7 @@
 
 **AI 에이전트가 Windows 데스크톱을 안전하게 관찰하고 조작하기 위한 control plane**
 
-[![Version](https://img.shields.io/badge/version-v2.1.0-blue.svg)](https://github.com/bagseunggwon30-cyber/cucp/releases/tag/v2.1.0)
+[![Version](https://img.shields.io/badge/version-v2.1.1-blue.svg)](https://github.com/bagseunggwon30-cyber/cucp/releases/tag/v2.1.1)
 [![Platform](https://img.shields.io/badge/platform-Windows%2010%2F11-0078D4.svg?logo=windows)](https://learn.microsoft.com/windows/)
 [![PowerShell](https://img.shields.io/badge/PowerShell-5.1%2B-5391FE.svg?logo=powershell)](https://learn.microsoft.com/powershell/)
 [![Tests](https://img.shields.io/badge/Pester-190%2F190%20passing-brightgreen.svg)](#-검증-상태)
@@ -58,7 +58,7 @@ window enum   accessible      screenshot /          한/영/일/중             
 | 🚑 **복구** | modal-detect / recovery-plan / recovery-run (UI failure recovery loop) |
 | 📊 **벤치마크** | read-only benchmark (p50 / p95 / avg + per-target SLO, **PII 미수집**) |
 | 📦 **패키징** | release-notes (CHANGELOG 자동 split + **secret redaction**) |
-| 🏭 **PLC 실습 보조** | XG5000 / XP-Builder task-card, 디바이스·주소·요구조건 JSON 자동 로드 |
+| 🏭 **PLC 실습 보조** | XG5000 / XP-Builder task-card, spec-board, 디바이스·주소·요구조건 JSON 자동 로드 |
 
 ---
 
@@ -109,6 +109,8 @@ $wrapper = "$env:USERPROFILE\.codex\skills\cucp-computer-use\scripts\cucp.ps1"
 & $w macro coord-profile --x 1200 --y 720 --target-match Kiro # DPI/모니터 프로파일
 & $w macro app-profile --match Chrome --auto-probe            # 앱 자동화 전략 점수
 & $w macro task-card show                                     # XG5000/XP-Builder context JSON
+& $w macro spec-board ensure                                  # XG5000 project spec/checklist JSON
+& $w macro spec-board ladder                                  # Ladder draft from spec-board device map
 ```
 
 ### XG5000 / XP-Builder 실습 context

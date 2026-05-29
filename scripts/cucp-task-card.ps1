@@ -315,7 +315,8 @@ $saveCloseButton.Add_Click({
 $openJsonButton.Add_Click({
   try {
     Save-UiCard
-    Start-Process -FilePath "notepad.exe" -ArgumentList "`"$Path`""
+    # argument injection 방어: 경로를 단일 배열 원소로 전달 (문자열 보간 회피).
+    Start-Process -FilePath "notepad.exe" -ArgumentList @($Path)
   } catch {
     [System.Windows.Forms.MessageBox]::Show($_.Exception.Message, "Open failed") | Out-Null
   }

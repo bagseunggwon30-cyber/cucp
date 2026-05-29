@@ -175,7 +175,7 @@ $Script:InvokeTimeoutMs = [Math]::Max(1000, $InvokeTimeoutMs)
 # Single source of truth for skill (wrapper) version. CHANGELOG/README 와 동기화.
 # Get-CucpVersionReport 가 이 상수 + cli/package.json + helper-server 헤더를 합쳐
 # `cucp.version/v1` envelope 으로 통합 출력.
-$Script:SkillVersion = "2.1.0"
+$Script:SkillVersion = "2.1.1"
 
 # ----- platform detection (v1.9.0 honest stub) -----------------------------
 # CUCP 의 actuation / OCR / UIA 는 Windows 에 종속 (Windows.Media.Ocr, P/Invoke,
@@ -217,6 +217,12 @@ $Script:TaskCardDir = Join-Path $Script:AuditDir "task-card"
 $Script:TaskCardPath = Join-Path $Script:TaskCardDir "current-task-card.json"
 if (-not (Test-Path -LiteralPath $Script:TaskCardScriptPath)) {
   $Script:TaskCardScriptPath = ""
+}
+$Script:SpecBoardScriptPath = Join-Path $PSScriptRoot "cucp-spec-board.ps1"
+$Script:SpecBoardDir = Join-Path $Script:AuditDir "spec-board"
+$Script:SpecBoardPath = Join-Path $Script:SpecBoardDir "current-spec-board.json"
+if (-not (Test-Path -LiteralPath $Script:SpecBoardScriptPath)) {
+  $Script:SpecBoardScriptPath = ""
 }
 
 # cli.mjs를 찾지 못하면 경고만 남기고 계속 진행 (read-only 매크로는 동작 가능)
@@ -491,6 +497,139 @@ function Stop-HelperServer {
 }
 
 # ============================================================================
+# v2.2.0 — Helper-server autostart (cold first-call 제거)
+# ============================================================================
+# benchmark 실측: read-only 매크로의 cold first-call 이 1.3~2.4초 (PowerShell
+# cold start + UIA/EnumWindows 초기화). warm (server-up) 은 ~25ms. AI agent 는
+# single-shot 으로 wrapper 를 부르므로 항상 cold 를 맞음. 이 함수들은 Windows
+# 로그인 시 helper-server 를 자동 기동하는 startup shim 을 설치/제거한다.
+#
+# 설계 선택 — 왜 Startup 폴더 .cmd shim 인가:
+#   - 레지스트리 Run 키 / 작업 스케줄러보다 권한 안전 (UAC / 관리자 불필요)
+#   - 사용자가 shell:startup 에서 직접 눈으로 확인 / 삭제 가능 (투명성)
+#   - HKCU 만 건드리지 않으므로 다른 user 영향 0 (multi-user 격리 유지)
+#   - shim 은 idle-timeout 을 길게 (기본 8h) 줘서 부팅 후 종일 warm 유지
+# 안전: PLC 제어와 무관한 read-only IPC server 만 띄움. live actuation 게이트
+#       (-AllowLiveControl) 는 server 경로에서도 그대로 적용된다.
+# ============================================================================
+
+function _Get-AutostartShimPath {
+  # 현재 user 의 Startup 폴더 안 shim 경로. 파일명에 PID 안 넣음 (1개만 유지).
+  $startupDir = [System.Environment]::GetFolderPath([System.Environment+SpecialFolder]::Startup)
+  return (Join-Path $startupDir "cucp-helper-autostart.cmd")
+}
+
+function Install-HelperAutostart {
+  # Startup 폴더에 helper-server 를 hidden 으로 기동하는 .cmd shim 생성 (idempotent).
+  param([int]$IdleTimeoutMs = 28800000)  # 기본 8시간
+  if (-not $Script:HelperServerScript -or -not (Test-Path -LiteralPath $Script:HelperServerScript)) {
+    return [pscustomobject]@{ status = "error"; reason = "helper_server_script_missing"; path = $Script:HelperServerScript }
+  }
+  $shimPath = _Get-AutostartShimPath
+  # cmd shim: powershell 을 hidden 으로 띄워 helper-server 를 background 기동.
+  # 경로/인자는 cmd 인용 규칙에 맞춰 "..." 로 감쌈 (공백 포함 경로 안전).
+  # 주의: start 명령과 인자는 반드시 한 줄. 줄바꿈되면 cmd 가 인자를 못 받는다.
+  # 주석은 ASCII 로만 (cmd 기본 코드페이지에서 한글 mojibake 회피).
+  $psArgs = '-NoProfile -NoLogo -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File "' + $Script:HelperServerScript + '" -IdleTimeoutMs ' + $IdleTimeoutMs
+  $startLine = 'start "" /min powershell.exe ' + $psArgs
+  $content = "@echo off`r`n" +
+             "rem CUCP helper-server autostart shim (v2.2.0). Remove via: cucp macro session uninstall-autostart`r`n" +
+             $startLine + "`r`n"
+  try {
+    # ASCII 인코딩 + 명시적 CRLF 로 cmd 호환성 보장. WriteAllText 로 한 번에 기록
+    # (Set-Content 배열 처리로 긴 줄이 분할되는 문제 회피).
+    [System.IO.File]::WriteAllText($shimPath, $content, [System.Text.Encoding]::ASCII)
+  } catch {
+    return [pscustomobject]@{ status = "error"; reason = "shim_write_failed"; detail = "$($_.Exception.Message)"; path = $shimPath }
+  }
+  return [pscustomobject]@{
+    status = "ok"
+    action = "install-autostart"
+    shim_path = $shimPath
+    idle_timeout_ms = $IdleTimeoutMs
+    note = "다음 로그인부터 helper-server 가 자동 기동됩니다. 지금 바로 띄우려면 macro session start-helper."
+  }
+}
+
+function Uninstall-HelperAutostart {
+  # Startup shim 제거. shim 없어도 graceful (status ok, removed=false).
+  $shimPath = _Get-AutostartShimPath
+  $removed = $false
+  if (Test-Path -LiteralPath $shimPath) {
+    try { Remove-Item -LiteralPath $shimPath -Force; $removed = $true }
+    catch { return [pscustomobject]@{ status = "error"; reason = "shim_remove_failed"; detail = "$($_.Exception.Message)"; path = $shimPath } }
+  }
+  return [pscustomobject]@{
+    status = "ok"
+    action = "uninstall-autostart"
+    shim_path = $shimPath
+    removed = $removed
+  }
+}
+
+function Get-HelperAutostartStatus {
+  # shim 설치 여부 + 경로 반환.
+  $shimPath = _Get-AutostartShimPath
+  return [pscustomobject]@{
+    status = "ok"
+    installed = [bool](Test-Path -LiteralPath $shimPath)
+    shim_path = $shimPath
+  }
+}
+
+# ============================================================================
+# v2.1.0 — 공통 헬퍼 (envelope / timestamp / error / emit)
+# ============================================================================
+# v1.8.0~v2.0.0 에서 추가된 매크로들이 반복하던 패턴을 한 곳으로 모음.
+# 목적:
+#   - timestamp 포맷 일관성 (ISO 8601 + 로컬 offset)
+#   - recoverable_errors[] 항목 schema 일관성 (code / layer / recommended_action)
+#   - "brief 면 한 줄, 아니면 JSON" emit 패턴 중복 제거
+# 기존 (v1.x) 매크로는 건드리지 않음 — 회귀 위험 회피. 신규 코드만 사용.
+# ============================================================================
+
+function _Now-Iso {
+  # ISO 8601 + 로컬 타임존 offset. 모든 v2.1.0 envelope 의 generated_at 에 사용.
+  return (Get-Date).ToString("yyyy-MM-ddTHH:mm:ss.fffK")
+}
+
+function _Make-RecoverableError {
+  # recoverable_errors[] 한 항목을 일관 schema 로 생성.
+  #   code               : 기계 판독용 짧은 코드 (예: cli_path_unresolved)
+  #   layer              : 어느 layer 에서 난 문제인지 (wrapper / cli / helper_server)
+  #   recommended_action : 호출자(AI agent)가 다음에 할 행동 한 줄
+  param(
+    [Parameter(Mandatory=$true)][string]$Code,
+    [string]$Layer = "wrapper",
+    [string]$RecommendedAction = ""
+  )
+  return @{
+    code = $Code
+    layer = $Layer
+    recommended_action = $RecommendedAction
+  }
+}
+
+function _Emit-Envelope {
+  # "brief 면 한 줄, 아니면 JSON 전체" 출력 패턴을 한 곳으로.
+  #   -Envelope   : 출력할 pscustomobject (JSON 직렬화 대상)
+  #   -BriefLine  : -Brief 모드일 때 출력할 한 줄 문자열
+  #   -Depth      : ConvertTo-Json depth (중첩 깊은 envelope 는 크게)
+  #   -ForceJson  : --json-only 처럼 brief 여도 JSON 강제
+  param(
+    [Parameter(Mandatory=$true)]$Envelope,
+    [string]$BriefLine = "",
+    [int]$Depth = 8,
+    [switch]$ForceJson
+  )
+  if ($Brief -and -not $ForceJson -and $BriefLine) {
+    [Console]::Out.WriteLine($BriefLine)
+  } else {
+    [Console]::Out.WriteLine(($Envelope | ConvertTo-Json -Depth $Depth))
+  }
+}
+
+# ============================================================================
 # v1.8.0 — Get-CucpVersionReport (Option B Layer 통합 surface)
 # ============================================================================
 # CUCP 의 entry point 는 cucp.ps1 단독. 그 아래 layer 가 셋:
@@ -552,25 +691,29 @@ function _Read-HelperServerVersion {
 
 function Get-CucpVersionReport {
   # 출력 envelope schema = "cucp.version/v1"
-  # surface = "wrapper_only" (cucp.ps1 단독 entry point), "wrapper+cli" (cli backend 동반)
-  # helper_mode = "persistent_server" (lock alive) | "child_only" (lock 부재/stale)
-  # status = "ok" | "partial" (layer 누락 시)
+  # 입력: 없음 (전역 상태 $Script:SkillVersion / CliPath / HelperServerScript / lock 참조)
+  # 출력 필드:
+  #   surface     : "wrapper_only" (cucp.ps1 단독) | "wrapper+cli" (cli backend 동반)
+  #   helper_mode : "persistent_server" (lock alive) | "child_only" (lock 부재/stale)
+  #   status      : "ok" | "partial" (cli / helper_server layer 누락 시)
+  #   versions    : { skill, cli, helper_server } SemVer
+  #   recoverable_errors[] : 누락 layer 마다 code/layer/recommended_action
+  # why: AI agent 가 한 번의 호출로 3 layer 버전 + 가동 모드를 파악하게 함.
   $errs = New-Object System.Collections.ArrayList
   $cli = _Read-CliVersion
   if ($cli.error) {
-    [void]$errs.Add(@{ code = $cli.error; layer = "cli"; recommended_action = "Set CUCP_CLI_PATH or run wrapper-only mode" })
+    [void]$errs.Add((_Make-RecoverableError -Code $cli.error -Layer "cli" -RecommendedAction "Set CUCP_CLI_PATH or run wrapper-only mode"))
   }
   $hs = _Read-HelperServerVersion
   if ($hs.error) {
-    [void]$errs.Add(@{ code = $hs.error; layer = "helper_server"; recommended_action = "Verify scripts/cucp-helper-server.ps1 헤더의 helper_version 표기" })
+    [void]$errs.Add((_Make-RecoverableError -Code $hs.error -Layer "helper_server" -RecommendedAction "Verify scripts/cucp-helper-server.ps1 헤더의 helper_version 표기"))
   }
   $lock = _Read-LockSafely
   $helperMode = "child_only"
   if ($lock -and -not (_Is-StaleLock -Lock $lock)) { $helperMode = "persistent_server" }
   $surface = "wrapper_only"
   if ($cli.version) { $surface = "wrapper+cli" }
-  $status = "ok"
-  if ($errs.Count -gt 0) { $status = "partial" }
+  $status = if ($errs.Count -gt 0) { "partial" } else { "ok" }
   return [pscustomobject]@{
     schema = "cucp.version/v1"
     status = $status
@@ -587,27 +730,25 @@ function Get-CucpVersionReport {
       helper_server = $Script:HelperServerScript
     }
     recoverable_errors = @($errs)
-    generated_at = (Get-Date).ToString("yyyy-MM-ddTHH:mm:ss.fffK")
+    generated_at = (_Now-Iso)
   }
 }
 
 function Invoke-MacroVersion {
   # macro version [--json-only]
   # 사용처:
-  #   - cucp version           (사람용 brief 출력)
-  #   - cucp macro version     (envelope JSON)
-  #   - cucp macro version --json-only  (envelope JSON only, --brief 무시)
+  #   - cucp version                    (사람용 brief 한 줄, 단 brief 모드일 때만)
+  #   - cucp macro version              (envelope JSON)
+  #   - cucp macro version --json-only  (envelope JSON only, brief 무시)
+  # 반환 exit code: status="partial" 이면 2, 아니면 0.
   param([string[]]$Rest)
   $jsonOnly = _Read-Switch -Rest $Rest -Name "--json-only"
   $report = Get-CucpVersionReport
-  if ($jsonOnly -or -not $Brief) {
-    [Console]::Out.WriteLine(($report | ConvertTo-Json -Depth 8))
-  } else {
-    $skill = if ($report.versions.skill) { "v$($report.versions.skill)" } else { "v?" }
-    $cli = if ($report.versions.cli) { "v$($report.versions.cli)" } else { "missing" }
-    $hs = if ($report.versions.helper_server) { "v$($report.versions.helper_server)" } else { "missing" }
-    [Console]::Out.WriteLine("ok cucp $skill (skill) + $cli (cli) + $hs (helper-server, $($report.helper_mode)) surface=$($report.surface) status=$($report.status)")
-  }
+  $skill = if ($report.versions.skill) { "v$($report.versions.skill)" } else { "v?" }
+  $cli = if ($report.versions.cli) { "v$($report.versions.cli)" } else { "missing" }
+  $hs = if ($report.versions.helper_server) { "v$($report.versions.helper_server)" } else { "missing" }
+  $briefLine = "ok cucp $skill (skill) + $cli (cli) + $hs (helper-server, $($report.helper_mode)) surface=$($report.surface) status=$($report.status)"
+  _Emit-Envelope -Envelope $report -BriefLine $briefLine -Depth 8 -ForceJson:$jsonOnly
   if ($report.status -eq "partial") { return 2 }
   return 0
 }
@@ -620,42 +761,39 @@ function Invoke-MacroVersion {
 # ============================================================================
 
 function _Make-PlatformStubEnvelope {
-  # action_kind: "live" | "read_only"
+  # 비Windows 환경 응답 envelope 생성.
+  #   ActionKind = "live"      → status="blocked",     reason="platform_unsupported"
+  #   ActionKind = "read_only" → status="honest_stub", reason="platform_stub_only"
+  # schema 는 cucp.observation/v1 유지 (호출자가 동일 파서로 처리 가능).
   param([string]$Macro, [string]$ActionKind)
   $isLive = ($ActionKind -eq "live")
-  $status = if ($isLive) { "blocked" } else { "honest_stub" }
-  $reason = if ($isLive) { "platform_unsupported" } else { "platform_stub_only" }
-  $env = [pscustomobject]@{
+  $recAction = if ($isLive) {
+    "CUCP live actuation requires Windows 10/11. Run on Windows or omit -AllowLiveControl."
+  } else {
+    "Read-only result on non-Windows is a stub. Cassette / observation may be incomplete."
+  }
+  return [pscustomobject]@{
     schema = "cucp.observation/v1"
-    status = $status
-    reason = $reason
+    status = if ($isLive) { "blocked" } else { "honest_stub" }
+    reason = if ($isLive) { "platform_unsupported" } else { "platform_stub_only" }
     macro = $Macro
     platform = $Script:PlatformName
     is_windows = $Script:IsWindowsPlatform
-    recoverable_errors = @(@{
-      code = $reason
-      layer = "wrapper"
-      recommended_action = if ($isLive) {
-        "CUCP live actuation requires Windows 10/11. Run on Windows or omit -AllowLiveControl."
-      } else {
-        "Read-only result on non-Windows is a stub. Cassette / observation may be incomplete."
-      }
-    })
-    generated_at = (Get-Date).ToString("yyyy-MM-ddTHH:mm:ss.fffK")
+    recoverable_errors = @((_Make-RecoverableError -Code (if ($isLive) { "platform_unsupported" } else { "platform_stub_only" }) -Layer "wrapper" -RecommendedAction $recAction))
+    generated_at = (_Now-Iso)
   }
-  return $env
 }
 
 function _Assert-PlatformOrStub {
-  # macro 진입 시 호출. live macro + 비Windows = exit 3. read-only 는 stub envelope 출력 후 exit 0 권장.
+  # macro 진입 시 호출. 반환값:
+  #   $null  → Windows. 호출자는 그냥 진행.
+  #   3      → 비Windows + live macro (envelope emit 후 exit 3 권장).
+  #   0      → 비Windows + read-only (honest_stub envelope emit 후 exit 0 권장).
   param([string]$Macro, [string]$ActionKind)
   if ($Script:IsWindowsPlatform) { return $null }
-  $env = _Make-PlatformStubEnvelope -Macro $Macro -ActionKind $ActionKind
-  if ($Brief) {
-    [Console]::Out.WriteLine("$($env.status) $Macro reason=$($env.reason) platform=$($env.platform)")
-  } else {
-    [Console]::Out.WriteLine(($env | ConvertTo-Json -Depth 8))
-  }
+  $envelope = _Make-PlatformStubEnvelope -Macro $Macro -ActionKind $ActionKind
+  $briefLine = "$($envelope.status) $Macro reason=$($envelope.reason) platform=$($envelope.platform)"
+  _Emit-Envelope -Envelope $envelope -BriefLine $briefLine -Depth 8
   if ($ActionKind -eq "live") { return 3 }
   return 0
 }
@@ -691,19 +829,22 @@ function Recorder-Start {
 }
 
 function Recorder-Append {
-  # Invoke-Macro 안에서 호출 (현재 코드는 hook 안 함; recorder 매크로가 명시적으로 step 추가).
-  param([string]$Macro, [string[]]$Args, [int]$Exit, [int]$ElapsedMs)
+  # 녹화 중이면 step 한 건 누적. 현재는 recorder 매크로가 명시적으로 호출하지 않고
+  # (자동 trajectory hook 미연동), 향후 Invoke-Macro onAfter hook 에서 사용 예정.
+  param([string]$Macro, [string[]]$StepArgs, [int]$Exit, [int]$ElapsedMs)
   if (-not $Script:RecorderActive) { return }
   $Script:RecorderSteps += [pscustomobject]@{
-    ts = (Get-Date).ToString("yyyy-MM-ddTHH:mm:ss.fffK")
+    ts = (_Now-Iso)
     macro = $Macro
-    args = @($Args)
+    args = @($StepArgs)
     exit_code = $Exit
     elapsed_ms = $ElapsedMs
   }
 }
 
 function Recorder-Stop {
+  # 녹화 종료 + session JSON 저장. schema = cucp.recorder/v1.
+  # 반환: { status, session, step_count, path }
   if (-not $Script:RecorderActive) {
     return [pscustomobject]@{ status = "not_recording"; session = $null; step_count = 0; path = $null }
   }
@@ -712,7 +853,7 @@ function Recorder-Stop {
     schema = "cucp.recorder/v1"
     name = $Script:RecorderSession
     started_at = if ($Script:RecorderSteps.Count -gt 0) { $Script:RecorderSteps[0].ts } else { $null }
-    ended_at = (Get-Date).ToString("yyyy-MM-ddTHH:mm:ss.fffK")
+    ended_at = (_Now-Iso)
     step_count = $Script:RecorderSteps.Count
     steps = $Script:RecorderSteps
   }
@@ -741,14 +882,12 @@ function Invoke-MacroRecorder {
       $name = _Read-OptValue -Rest $rest2 -Name "--name"
       $sName = Recorder-Start -Name $name
       $out = [pscustomobject]@{ schema = "cucp.recorder/v1"; status = "recording"; session = $sName }
-      if ($Brief) { [Console]::Out.WriteLine("ok recorder start session=$sName") }
-      else { [Console]::Out.WriteLine(($out | ConvertTo-Json -Depth 6)) }
+      _Emit-Envelope -Envelope $out -BriefLine "ok recorder start session=$sName" -Depth 6
       return 0
     }
     "stop" {
       $r = Recorder-Stop
-      if ($Brief) { [Console]::Out.WriteLine("ok recorder stop session=$($r.session) steps=$($r.step_count) path=$($r.path)") }
-      else { [Console]::Out.WriteLine(($r | ConvertTo-Json -Depth 6)) }
+      _Emit-Envelope -Envelope $r -BriefLine "ok recorder stop session=$($r.session) steps=$($r.step_count) path=$($r.path)" -Depth 6
       return 0
     }
     "list" {
@@ -809,8 +948,7 @@ function Invoke-MacroRecorder {
         results = $results
         exit_code = $finalExit
       }
-      if ($Brief) { [Console]::Out.WriteLine("ok recorder replay session=$name mode=$($out.mode) executed=$($results.Count)/$($session.step_count) exit=$finalExit") }
-      else { [Console]::Out.WriteLine(($out | ConvertTo-Json -Depth 12)) }
+      _Emit-Envelope -Envelope $out -BriefLine "ok recorder replay session=$name mode=$($out.mode) executed=$($results.Count)/$($session.step_count) exit=$finalExit" -Depth 12
       return $finalExit
     }
     default {
@@ -894,11 +1032,8 @@ function Invoke-MacroAuditSummary {
     blocked_count = $blockedCount
     since_cutoff = if ($cutoff) { $cutoff.ToString("yyyy-MM-ddTHH:mm:ss.fffK") } else { $null }
   }
-  if ($Brief -and -not $jsonOnly) {
-    [Console]::Out.WriteLine("$status audit-summary files=$($files.Count) events=$totalEvents sensitive=$sensitiveCount blocked=$blockedCount")
-  } else {
-    [Console]::Out.WriteLine(($out | ConvertTo-Json -Depth 8))
-  }
+  $briefLine = "$status audit-summary files=$($files.Count) events=$totalEvents sensitive=$sensitiveCount blocked=$blockedCount"
+  _Emit-Envelope -Envelope $out -BriefLine $briefLine -Depth 8 -ForceJson:$jsonOnly
   return 0
 }
 
@@ -954,11 +1089,7 @@ function Invoke-MacroPolicyCheck {
     policy_path = $policyPath
     policy_error = $policyError
   }
-  if ($Brief -and -not $jsonOnly) {
-    [Console]::Out.WriteLine("ok policy-check action=$action decision=$decision reason=$reason")
-  } else {
-    [Console]::Out.WriteLine(($out | ConvertTo-Json -Depth 6))
-  }
+  _Emit-Envelope -Envelope $out -BriefLine "ok policy-check action=$action decision=$decision reason=$reason" -Depth 6 -ForceJson:$jsonOnly
   if ($decision -eq "deny") { return 3 }
   return 0
 }
@@ -991,10 +1122,34 @@ function _Vision-CheckBudget {
 }
 
 function _Vision-RecordCall {
+  # 호출 성공 시 누적 카운터 증가 + history 한 줄.
   param([string]$Macro, [int]$Tokens = 1000)
   $Script:VisionBudget.calls = $Script:VisionBudget.calls + 1
   $Script:VisionBudget.tokens = $Script:VisionBudget.tokens + $Tokens
   $Script:VisionBudget.history += [pscustomobject]@{ ts = (Get-Date).ToString("HH:mm:ss"); macro = $Macro; tokens = $Tokens }
+}
+
+function _Vision-GateOrRecord {
+  # vision 매크로 진입부 공통 게이트.
+  # 한도 초과면 blocked envelope 을 직접 emit 하고 exit code 3 을 반환.
+  # 통과면 호출을 카운터에 기록하고 $null 반환 (호출자는 계속 진행).
+  #   반환: 3 (blocked) | $null (allowed)
+  param([string]$Macro, [int]$EstimatedTokens = 1000)
+  $bg = _Vision-CheckBudget -Macro $Macro -EstimatedTokens $EstimatedTokens
+  if (-not $bg.allowed) {
+    $payload = [pscustomobject]@{
+      schema = "cucp.safety-block/v1"
+      status = "blocked"
+      reason = $bg.reason
+      macro = $Macro
+      budget = $Script:VisionBudget
+      next_action = "Increase CUCP_VISION_MAX_CALLS / CUCP_VISION_MAX_TOKENS or unset to disable budget."
+    }
+    _Emit-Envelope -Envelope $payload -BriefLine "blocked $Macro reason=$($bg.reason)" -Depth 6
+    return 3
+  }
+  _Vision-RecordCall -Macro $Macro -Tokens $EstimatedTokens
+  return $null
 }
 
 # ============================================================================
@@ -2360,6 +2515,7 @@ function Invoke-Macro {
     # ── Native helper 직통 (외부 helper 의존 없음) ─────────────────────────
     "native-health"     { return Invoke-MacroNativeHealth -Rest $rest }
     "task-card"         { return Invoke-MacroTaskCard -Rest $rest }
+    "spec-board"        { return Invoke-MacroSpecBoard -Rest $rest }
     "native-windows"    { return Invoke-MacroNativeWindows -Rest $rest }
     "native-screenshot" { return Invoke-MacroNativeScreenshot -Rest $rest }
     "click-point"       { return Invoke-MacroClickPoint -Rest $rest }
@@ -2439,7 +2595,7 @@ function Invoke-Macro {
     "click-and-verify" { return Invoke-MacroClickAndVerify -Rest $rest }
     "auto-do"       { return Invoke-MacroAutoDo -Rest $rest }
     default {
-      Write-Notice -Level "ERROR" -Message "알 수 없는 매크로: $sub. 사용 가능: version, safety-classify, daemon, mouse-verify, click-label, double-click-label, right-click-label, click-id, click-point, fill-label, focus-window, focus-verify, wait-window, wait-label, find-label, list-affordances, shortcut, goal, session, self-test, trajectory, ensure-helper, vision-find, vision-click, vision-click-precise, icon-find, icon-click, screenshot, windows, log-tail, diagnose-lag, cleanup, clipboard, process, registry, notify, multi-select, multi-edit, scrape, dom-snapshot, metrics, perf, health-detail, health-quick, app-launch, app-close, with-app, click-and-verify, auto-do, native-health, task-card, native-windows, native-screenshot, type-native, shortcut-native, uia-click-label, uia-invoke, uia-set-value, uia-toggle, workflow-plan, workflow-run, smart-plan, app-profile, task-preset, task-plan, task-run, form-plan, form-run, smart-click, watch, ocr-screen, ocr-image, ocr-find-text, ocr-click, ocr-uia-fuse, screenshot-diff, click-and-verify-screen, ocr-uia-invoke, history, coord-profile, coord-map, coord-anchor, hit-test, hit-test-batch, hit-scan, point-plan, target-validate, safe-type, cdp-detect, cdp-eval, cdp-type, cdp-click, cdp-smart-find, cdp-smart-type-find, cdp-smart-click, cdp-smart-type, cdp-deep-find, cdp-prosemirror-insert, ime-paste, safe-type-ime, modal-detect, recovery-plan, recovery-run, precision-validate, benchmark, release-notes"
+      Write-Notice -Level "ERROR" -Message "알 수 없는 매크로: $sub. 사용 가능: version, safety-classify, daemon, mouse-verify, click-label, double-click-label, right-click-label, click-id, click-point, fill-label, focus-window, focus-verify, wait-window, wait-label, find-label, list-affordances, shortcut, goal, session, self-test, trajectory, ensure-helper, vision-find, vision-click, vision-click-precise, icon-find, icon-click, screenshot, windows, log-tail, diagnose-lag, cleanup, clipboard, process, registry, notify, multi-select, multi-edit, scrape, dom-snapshot, metrics, perf, health-detail, health-quick, app-launch, app-close, with-app, click-and-verify, auto-do, native-health, task-card, spec-board, native-windows, native-screenshot, type-native, shortcut-native, uia-click-label, uia-invoke, uia-set-value, uia-toggle, workflow-plan, workflow-run, smart-plan, app-profile, task-preset, task-plan, task-run, form-plan, form-run, smart-click, watch, ocr-screen, ocr-image, ocr-find-text, ocr-click, ocr-uia-fuse, screenshot-diff, click-and-verify-screen, ocr-uia-invoke, history, coord-profile, coord-map, coord-anchor, hit-test, hit-test-batch, hit-scan, point-plan, target-validate, safe-type, cdp-detect, cdp-eval, cdp-type, cdp-click, cdp-smart-find, cdp-smart-type-find, cdp-smart-click, cdp-smart-type, cdp-deep-find, cdp-prosemirror-insert, ime-paste, safe-type-ime, modal-detect, recovery-plan, recovery-run, precision-validate, benchmark, release-notes"
       throw "Unknown macro: $sub"
     }
   }
@@ -2606,6 +2762,128 @@ function Invoke-MacroTaskCard {
     }
     default {
       [Console]::Out.WriteLine("Usage: macro task-card open|show|ensure|save|path|clear [--tool XG5000] [--project <name>] [--plc <model>] [--devices <list>] [--requirements <text>]")
+      return 2
+    }
+  }
+}
+
+function Invoke-SpecBoardScript {
+  param(
+    [Parameter(Mandatory)] [string]$Mode,
+    [string[]]$ExtraArgs = @()
+  )
+  if (-not $Script:SpecBoardScriptPath -or -not (Test-Path -LiteralPath $Script:SpecBoardScriptPath)) {
+    throw "CUCP spec-board script is missing: $($Script:SpecBoardScriptPath)"
+  }
+  $args = @(
+    "-NoProfile",
+    "-ExecutionPolicy", "Bypass",
+    "-File", $Script:SpecBoardScriptPath,
+    "-Mode", $Mode,
+    "-Path", $Script:SpecBoardPath
+  )
+  foreach ($arg in @($ExtraArgs)) {
+    if ($null -ne $arg) { $args += "$arg" }
+  }
+  return @(& powershell.exe @args)
+}
+
+function Get-SpecBoardContext {
+  param([switch]$Ensure)
+  if (-not $Script:SpecBoardScriptPath -or -not (Test-Path -LiteralPath $Script:SpecBoardScriptPath)) {
+    return $null
+  }
+  try {
+    if ($Ensure -or -not (Test-Path -LiteralPath $Script:SpecBoardPath)) {
+      Invoke-SpecBoardScript -Mode "ensure" | Out-Null
+    }
+    if (-not (Test-Path -LiteralPath $Script:SpecBoardPath)) { return $null }
+    $raw = Get-Content -LiteralPath $Script:SpecBoardPath -Raw -Encoding UTF8
+    if ([string]::IsNullOrWhiteSpace($raw)) { return $null }
+    return ($raw | ConvertFrom-Json)
+  } catch {
+    return [pscustomobject]@{
+      schema = "cucp.spec-board/v1"
+      status = "invalid"
+      path = $Script:SpecBoardPath
+      error = $_.Exception.Message
+    }
+  }
+}
+
+function Invoke-MacroSpecBoard {
+  param([string[]]$Rest)
+  $action = if ($Rest -and $Rest.Count -gt 0) { "$($Rest[0])".ToLowerInvariant() } else { "open" }
+  $jsonOnly = _Read-Switch -Rest $Rest -Name "--json-only"
+
+  switch ($action) {
+    "open" {
+      Invoke-SpecBoardScript -Mode "ensure" | Out-Null
+      $args = @(
+        "-NoProfile",
+        "-ExecutionPolicy", "Bypass",
+        "-File", $Script:SpecBoardScriptPath,
+        "-Mode", "open",
+        "-Path", $Script:SpecBoardPath
+      )
+      Start-Process -FilePath "powershell.exe" -ArgumentList (ConvertTo-ProcessArgumentString -ArgList $args) -WindowStyle Normal | Out-Null
+      $payload = [pscustomobject]@{
+        schema = "cucp.spec-board/macro/v1"
+        status = "ok"
+        action = "open"
+        path = $Script:SpecBoardPath
+        next_action = "Keep this board visible while working in XG5000; use spec-board check --id XG-001 as tasks are completed."
+      }
+      if ($Brief -and -not $jsonOnly) { [Console]::Out.WriteLine("ok spec-board action=open path=$($Script:SpecBoardPath)") }
+      else { [Console]::Out.WriteLine(($payload | ConvertTo-Json -Depth 8)) }
+      return 0
+    }
+    "show" {
+      $raw = Invoke-SpecBoardScript -Mode "show"
+      [Console]::Out.WriteLine(($raw -join "`n"))
+      return 0
+    }
+    "ensure" {
+      $raw = Invoke-SpecBoardScript -Mode "ensure"
+      if ($Brief -and -not $jsonOnly) { [Console]::Out.WriteLine("ok spec-board action=ensure path=$($Script:SpecBoardPath)") }
+      else { [Console]::Out.WriteLine(($raw -join "`n")) }
+      return 0
+    }
+    "path" {
+      [Console]::Out.WriteLine($Script:SpecBoardPath)
+      return 0
+    }
+    "check" {
+      $id = _Read-OptValue -Rest $Rest -Name "--id"
+      if (-not $id -and $Rest.Count -gt 1) { $id = "$($Rest[1])" }
+      $raw = Invoke-SpecBoardScript -Mode "check" -ExtraArgs @("-TaskId", "$id")
+      [Console]::Out.WriteLine(($raw -join "`n"))
+      return 0
+    }
+    "uncheck" {
+      $id = _Read-OptValue -Rest $Rest -Name "--id"
+      if (-not $id -and $Rest.Count -gt 1) { $id = "$($Rest[1])" }
+      $raw = Invoke-SpecBoardScript -Mode "uncheck" -ExtraArgs @("-TaskId", "$id")
+      [Console]::Out.WriteLine(($raw -join "`n"))
+      return 0
+    }
+    "ladder" {
+      $raw = Invoke-SpecBoardScript -Mode "ladder"
+      [Console]::Out.WriteLine(($raw -join "`n"))
+      return 0
+    }
+    "markdown" {
+      $raw = Invoke-SpecBoardScript -Mode "markdown"
+      [Console]::Out.WriteLine(($raw -join "`n"))
+      return 0
+    }
+    "clear" {
+      $raw = Invoke-SpecBoardScript -Mode "clear"
+      [Console]::Out.WriteLine(($raw -join "`n"))
+      return 0
+    }
+    default {
+      [Console]::Out.WriteLine("Usage: macro spec-board open|show|ensure|path|check|uncheck|ladder|markdown|clear [--id XG-001]")
       return 2
     }
   }
@@ -4904,22 +5182,9 @@ Do NOT include markdown fences, prose, or explanations outside the JSON object.
 
 function Invoke-MacroVisionFind {
   param([string[]]$Rest)
-  # v2.0.0 — vision LLM token budget gate
-  $bg = _Vision-CheckBudget -Macro "vision-find" -EstimatedTokens 1000
-  if (-not $bg.allowed) {
-    $payload = [pscustomobject]@{
-      schema = "cucp.safety-block/v1"
-      status = "blocked"
-      reason = $bg.reason
-      macro = "vision-find"
-      budget = $Script:VisionBudget
-      next_action = "Increase CUCP_VISION_MAX_CALLS / CUCP_VISION_MAX_TOKENS or unset to disable budget."
-    }
-    if ($Brief) { [Console]::Out.WriteLine("blocked vision-find reason=$($bg.reason)") }
-    else { [Console]::Out.WriteLine(($payload | ConvertTo-Json -Depth 6)) }
-    return 3
-  }
-  _Vision-RecordCall -Macro "vision-find" -Tokens 1000
+  # v2.0.0 — vision LLM token budget gate (공통 헬퍼). 한도 초과 시 exit 3.
+  $gate = _Vision-GateOrRecord -Macro "vision-find" -EstimatedTokens 1000
+  if ($null -ne $gate) { return $gate }
   $description = _Read-OptValue -Rest $Rest -Name "--describe"
   $screenshot = _Read-OptValue -Rest $Rest -Name "--screenshot"
   $model = _Read-OptValue -Rest $Rest -Name "--model"
@@ -4974,22 +5239,9 @@ function Invoke-MacroVisionFind {
 
 function Invoke-MacroVisionClick {
   param([string[]]$Rest)
-  # v2.0.0 — vision LLM token budget gate
-  $bg = _Vision-CheckBudget -Macro "vision-click" -EstimatedTokens 1500
-  if (-not $bg.allowed) {
-    $payload = [pscustomobject]@{
-      schema = "cucp.safety-block/v1"
-      status = "blocked"
-      reason = $bg.reason
-      macro = "vision-click"
-      budget = $Script:VisionBudget
-      next_action = "Increase CUCP_VISION_MAX_CALLS / CUCP_VISION_MAX_TOKENS or unset to disable budget."
-    }
-    if ($Brief) { [Console]::Out.WriteLine("blocked vision-click reason=$($bg.reason)") }
-    else { [Console]::Out.WriteLine(($payload | ConvertTo-Json -Depth 6)) }
-    return 3
-  }
-  _Vision-RecordCall -Macro "vision-click" -Tokens 1500
+  # v2.0.0 — vision LLM token budget gate (공통 헬퍼). 한도 초과 시 exit 3.
+  $gate = _Vision-GateOrRecord -Macro "vision-click" -EstimatedTokens 1500
+  if ($null -ne $gate) { return $gate }
   $description = _Read-OptValue -Rest $Rest -Name "--describe"
   $window = _Read-OptValue -Rest $Rest -Name "--window"
   $verifyLabel = _Read-OptValue -Rest $Rest -Name "--verify-label"
@@ -9734,7 +9986,7 @@ function _Build-WorkflowPlan {
   $readOnlyMacros = @(
     "windows","native-windows","wait-window","wait-label","find-label","list-affordances",
     "health-quick","health-detail","native-health","metrics","perf","log-tail","diagnose-lag",
-    "session","trajectory","history","screenshot","native-screenshot",
+    "session","trajectory","history","screenshot","native-screenshot","task-card","spec-board",
     "safety-classify","coord-profile","coord-map","coord-anchor","hit-test","hit-test-batch","hit-scan","point-plan","target-validate","smart-plan","app-profile","task-preset","task-plan","form-plan",
     "cdp-detect","cdp-eval","cdp-smart-find","cdp-smart-type-find",
     "ocr-screen","ocr-image","ocr-find-text","ocr-uia-fuse","screenshot-diff",
@@ -10520,6 +10772,7 @@ function Invoke-MacroAppProfile {
   if (-not $target) {
     $sw.Stop()
     $taskCard = Get-TaskCardContext
+    $specBoard = Get-SpecBoardContext
     $payload = [pscustomobject]@{
       schema = "cucp.app-profile/v1"
       status = "partial"
@@ -10557,6 +10810,7 @@ function Invoke-MacroAppProfile {
       recommended_task_options = @()
       probe_commands = @()
       task_card = $taskCard
+      spec_board = $specBoard
       windows_sample = @($sample)
       elapsed_ms = [int]$sw.Elapsed.TotalMilliseconds
       next_action = if ($match) { "Run macro windows --json-only to inspect available windows, then retry app-profile with a narrower --match." } else { "Open or focus the target app, then run macro app-profile again." }
@@ -10668,6 +10922,7 @@ function Invoke-MacroAppProfile {
   $browserLike = ($processLower -match '^(chrome|msedge|brave|firefox|kiro|cursor|code|windsurf|electron)$') -or ($classLower -like '*chrome_widgetwin*')
   $industrialLike = ($identity -match 'xg5000|xp-builder|xg-pm|cimon|scada|xgt|plc|modbus')
   $taskCard = Get-TaskCardContext -Ensure:([bool]$industrialLike)
+  $specBoard = Get-SpecBoardContext -Ensure:([bool]$industrialLike)
   $officeLike = ($identity -match 'winword|excel|powerpnt|outlook|onenote|hwp|wordpad|notepad')
   $runCdpProbe = (-not $noProbe) -and ($probeCdpRequested -or $browserLike)
   $runUiaProbe = (-not $noProbe) -and $probeUiaRequested
@@ -10702,6 +10957,11 @@ function Invoke-MacroAppProfile {
       [void]$notes.Add("CUCP task-card context is loaded; use its devices, requirements, and safety flags before planning live actions.")
     } else {
       [void]$notes.Add("Run macro task-card open to capture devices, requirements, and safety constraints for this XG5000/XP-Builder session.")
+    }
+    if ($specBoard) {
+      [void]$notes.Add("CUCP spec-board context is loaded; follow its environment, network, device map, kanban tasks, and warnings.")
+    } else {
+      [void]$notes.Add("Run macro spec-board open to keep the XG5000 project spec and checklist visible during work.")
     }
   } elseif ($officeLike) {
     $appType = "document_or_mail_app"
@@ -10824,6 +11084,7 @@ function Invoke-MacroAppProfile {
     probe_commands = @($probeCommands)
     affordance_probe = $affordanceCommand
     task_card = $taskCard
+    spec_board = $specBoard
     windows_sample = @($sample)
     notes = @($notes)
     elapsed_ms = [int]$sw.Elapsed.TotalMilliseconds
@@ -13260,6 +13521,8 @@ function Invoke-MacroSession {
         cli_path = $Script:CliPath
         task_card_path = $Script:TaskCardPath
         task_card_exists = [bool](Test-Path -LiteralPath $Script:TaskCardPath)
+        spec_board_path = $Script:SpecBoardPath
+        spec_board_exists = [bool](Test-Path -LiteralPath $Script:SpecBoardPath)
         cache_seconds = $CacheSeconds
         helper_server = $hsStatus
       }
@@ -13311,8 +13574,33 @@ function Invoke-MacroSession {
       }
       return 0
     }
+    "install-autostart" {
+      # v2.2.0: Windows 로그인 시 helper-server 자동 기동 shim 설치 (cold first-call 제거)
+      $idleStr = _Read-OptValue -Rest $Rest -Name "--idle-timeout-ms"
+      $idleMs = 28800000  # 기본 8시간
+      if ($idleStr) { try { $idleMs = [int]$idleStr } catch { $idleMs = 28800000 } }
+      $r = Install-HelperAutostart -IdleTimeoutMs $idleMs
+      $payload = [ordered]@{ schema = "cucp.helper-autostart/v1" }
+      foreach ($p in $r.PSObject.Properties) { $payload[$p.Name] = $p.Value }
+      _Emit-Envelope -Envelope ([pscustomobject]$payload) -BriefLine "$($r.status) session install-autostart shim=$($r.shim_path)" -Depth 6
+      if ($r.status -eq "ok") { return 0 } else { return 1 }
+    }
+    "uninstall-autostart" {
+      $r = Uninstall-HelperAutostart
+      $payload = [ordered]@{ schema = "cucp.helper-autostart/v1" }
+      foreach ($p in $r.PSObject.Properties) { $payload[$p.Name] = $p.Value }
+      _Emit-Envelope -Envelope ([pscustomobject]$payload) -BriefLine "$($r.status) session uninstall-autostart removed=$($r.removed)" -Depth 6
+      if ($r.status -eq "ok") { return 0 } else { return 1 }
+    }
+    "autostart-status" {
+      $r = Get-HelperAutostartStatus
+      $payload = [ordered]@{ schema = "cucp.helper-autostart/v1" }
+      foreach ($p in $r.PSObject.Properties) { $payload[$p.Name] = $p.Value }
+      _Emit-Envelope -Envelope ([pscustomobject]$payload) -BriefLine "ok session autostart-status installed=$($r.installed)" -Depth 6
+      return 0
+    }
     default {
-      Write-Notice -Level "ERROR" -Message "session 하위 명령: clear-cache, info, start-helper, stop-helper, helper-status"
+      Write-Notice -Level "ERROR" -Message "session 하위 명령: clear-cache, info, start-helper, stop-helper, helper-status, install-autostart, uninstall-autostart, autostart-status"
       return 1
     }
   }
@@ -13340,11 +13628,12 @@ if (-not $CucpArgs -or $CucpArgs.Count -eq 0) {
   Write-Host "  macro shortcut           --keys <combo>"
   Write-Host "  macro goal               --objective <text> [--max-steps <n>] [--max-phase-ms <n>] [--provider heuristic|codex]"
   Write-Host "                           [--verify-label <text>] [--verify-window <title>] [--verify-timeout-ms <n>] [--dry-run]"
-  Write-Host "  macro session            clear-cache | info"
+  Write-Host "  macro session            clear-cache | info | start-helper | stop-helper | helper-status | install-autostart | uninstall-autostart | autostart-status"
   Write-Host "  macro self-test          [--deep] [--strict]"
   Write-Host "  macro trajectory         show [--last <n>] | tail | clear"
   Write-Host "  macro ensure-helper      [--wait-ms <n>]"
   Write-Host "  macro task-card          open|show|ensure|save|path|clear   (XG5000/XP-Builder context card)"
+  Write-Host "  macro spec-board         open|show|ensure|path|check|uncheck|ladder|markdown|clear   (XG5000 project spec board)"
   Write-Host "  macro vision-find        --describe <text> [--screenshot <path>] [--model <name>] [--timeout-ms <n>]"
   Write-Host "  macro vision-click       --describe <text> [--window <title>] [--verify-label <text>] [--verify-timeout-ms <n>] [--model <name>]"
   Write-Host "  macro metrics            (operational counters + click/cache rates)"
