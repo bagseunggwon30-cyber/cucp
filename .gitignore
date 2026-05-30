@@ -45,3 +45,7 @@ tests/scratch-*.ps1
 # v2.1.x: agent temp diagnostic scripts (dot prefix) + pester output cache (do not commit)
 tests/.*.ps1
 tests/.*.txt
+
+# live-verify cassettes: 로컬 환경에서 실행한 결과 (창 제목 / URL 등 개인 화면 정보
+# 포함 가능). 공개 배포물에 넣지 않는다. 필요하면 references/live-cassette-runner.ps1 로 재생성.
+live-verify/
