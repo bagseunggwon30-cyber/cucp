@@ -1,5 +1,36 @@
 # CUCP Changelog
 
+## v2.4.1 - Ladder pattern library + I/O parameter modules (2026-05-30)
+
+자산 1(아키텍트)을 단일 패턴에서 **패턴 라이브러리**로 확장하고, spec-board 에 I/O 파라미터
+모듈 정보를 추가. "머릿속 구상 → 현장급 레더(모듈 장착 안내 + 변수 + 줄별 설명문) → 질문하며
+학습"하는 루프를 지원. 범위는 그대로 XG5000 편집/변수/레더텍스트까지 (download/RUN 금지).
+
+### Added — spec-board `modules` (I/O Parameter)
+
+- `cucp.spec-board/v2` 에 `modules` 필드: base/slot 별 장착 모듈 — 디지털 I/O, 아날로그 입력
+  (XBF-AD04A, raw 스케일), RTD 온도(XBF-RD04A, PT100), 아날로그 출력(XBF-DV04A). 채널 주소와
+  스케일/센서 정보 포함. `spec-board sequence` 렌더가 I/O Parameter 장착 안내 표를 함께 출력.
+
+### Added — Ladder pattern library (asset 1)
+
+- `xg5000-ladder-architect/references/patterns/` 패턴 카탈로그:
+  - `00-pattern-index.md` — 공정별 패턴 선택 가이드 + 변수 명명 컨벤션 + 산출물 표준(I/O안내·변수표·레더·설명문·검증)
+  - `basic-self-hold.md`, `motor-3wire.md`, `interlock-fwd-rev.md` — 기본 회로(자기유지·3선식·정역인터록)
+  - `seq-word-state-machine.md` — 정수형 스텝 제어
+  - `analog-scaling.md` — 아날로그 스케일링(32비트 DMUL/DDIV 오버플로 방지)
+  - `temperature-control.md` — RTD 온도제어(히스테리시스/PID, 과열·단선 방어)
+  - `arithmetic-compare.md` — 사칙연산/비교/카운트
+- SKILL.md 전면 개정: 패턴 선택 → 5종 산출물(I/O 파라미터 안내·변수표·레더·줄별 설명문·검증
+  체크리스트) 항상 세트 제출, 계층 구조(안전→모드→시퀀스→출력→진단), 학습 루프 가이드.
+- 모든 패턴은 공개 표준 제어 회로 지식. 특정 저자/영상 회로를 그대로 베끼지 않음.
+
+### Versions
+
+- skill **2.4.1** · helper-server 2.0.0 · cli backend 1.0.0
+
+---
+
 ## v2.4.0 - XG5000 Word State Machine ladder system (2026-05-30)
 
 XG5000 레더를 **정수형 스텝 제어(Word State Machine)** 로 생성·검증하는 3-자산 통합 세트.

@@ -176,7 +176,7 @@ $Script:InvokeTimeoutMs = [Math]::Max(1000, $InvokeTimeoutMs)
 # Get-CucpVersionReport 가 이 상수 + cli/package.json + helper-server 헤더를 합쳐
 # `cucp.version/v1` envelope 으로 통합 출력.
 # v2.3.0: daemon serve (single-shot 가속 정공법) + autostart(v2.2.0) 포함.
-$Script:SkillVersion = "2.4.0"
+$Script:SkillVersion = "2.4.1"
 
 # ----- platform detection (v1.9.0 honest stub) -----------------------------
 # CUCP 의 actuation / OCR / UIA 는 Windows 에 종속 (Windows.Media.Ocr, P/Invoke,

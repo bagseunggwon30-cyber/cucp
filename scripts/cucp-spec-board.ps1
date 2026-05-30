@@ -46,6 +46,16 @@ function New-DefaultSpecBoard {
       port = 2004
       notes = "EXAMPLE values (RFC 5737 192.0.2.0/24). Replace with the real PLC/PC/server IPs for your site before use. Host table registration required for the engineering PC."
     }
+    # ── I/O 파라미터: 베이스 슬롯에 장착할 모듈 목록 (XG5000 I/O Parameter 대응) ──
+    # 아키텍트는 이 modules 를 보고 "어느 슬롯에 무슨 모듈을 장착하라"는 I/O 파라미터
+    # 설정 안내 + 그 모듈의 채널 주소를 device_map 과 일치시킨 변수까지 만든다.
+    # base/slot 0 은 보통 CPU 내장 I/O. 특수모듈(아날로그/온도/위치결정)은 채널 스케일 정보 포함.
+    modules = @(
+      [pscustomobject]@{ base = 0; slot = 0; module = "XBC-DN32H (CPU 내장 I/O)"; kind = "digital"; points = "DI16/DO16"; address_range = "P0000-P000F / P0040-P004F"; notes = "CPU 본체 내장 디지털 I/O" },
+      [pscustomobject]@{ base = 0; slot = 1; module = "XBF-AD04A"; kind = "analog_input"; channels = 4; range = "4-20mA / 0-10V"; scale = [pscustomobject]@{ raw_min = 0; raw_max = 16000; eng_min = 0; eng_max = 100; unit = "%" }; address_range = "U01.00-U01.03"; notes = "아날로그 입력 4채널. raw(0-16000) -> eng 스케일은 레더에서 처리." },
+      [pscustomobject]@{ base = 0; slot = 2; module = "XBF-RD04A"; kind = "rtd_temperature"; channels = 4; sensor = "PT100"; range = "-200~600C"; address_range = "U02.00-U02.03"; notes = "RTD 온도 입력 4채널. 0.1C 단위 정수값(예 253 = 25.3C)." },
+      [pscustomobject]@{ base = 0; slot = 3; module = "XBF-DV04A"; kind = "analog_output"; channels = 4; range = "0-10V / 4-20mA"; scale = [pscustomobject]@{ eng_min = 0; eng_max = 100; raw_min = 0; raw_max = 16000; unit = "%" }; address_range = "U03.00-U03.03"; notes = "아날로그 출력 4채널 (인버터 속도지령/밸브개도 등)." }
+    )
     device_map = @(
       [pscustomobject]@{ address = "P0020"; name = "START_BUTTON"; type = "bit"; direction = "input"; description = "시작 버튼 (XBE-DC16A)" },
       [pscustomobject]@{ address = "P0021"; name = "STOP_BUTTON"; type = "bit"; direction = "input"; description = "정지 버튼" },
@@ -305,6 +315,30 @@ function Render-SequencePlan {
   $lines = New-Object System.Collections.ArrayList
   [void]$lines.Add("# Word State Machine sequences for $($Board.title)")
   [void]$lines.Add("")
+
+  # ── I/O 파라미터(모듈 장착) 섹션 — 아키텍트가 모듈 장착 안내 + 채널 변수 생성에 사용 ──
+  $mods = @($Board.modules)
+  if ($mods.Count -gt 0) {
+    [void]$lines.Add("## I/O Parameter (modules to mount in XG5000)")
+    [void]$lines.Add("| base | slot | module | kind | channels/points | address | scale/sensor | notes |")
+    [void]$lines.Add("| ---: | ---: | :--- | :--- | :--- | :--- | :--- | :--- |")
+    foreach ($m in $mods) {
+      $chpt = if ($m.PSObject.Properties.Name -contains "channels" -and $m.channels) { "$($m.channels)ch" } elseif ($m.PSObject.Properties.Name -contains "points" -and $m.points) { "$($m.points)" } else { "" }
+      $scaleStr = ""
+      if ($m.PSObject.Properties.Name -contains "scale" -and $m.scale) {
+        $scaleStr = "raw $($m.scale.raw_min)-$($m.scale.raw_max) -> $($m.scale.eng_min)-$($m.scale.eng_max)$($m.scale.unit)"
+      } elseif ($m.PSObject.Properties.Name -contains "sensor" -and $m.sensor) {
+        $scaleStr = "$($m.sensor) $($m.range)"
+      } elseif ($m.PSObject.Properties.Name -contains "range" -and $m.range) {
+        $scaleStr = "$($m.range)"
+      }
+      [void]$lines.Add("| $($m.base) | $($m.slot) | $($m.module) | $($m.kind) | $chpt | $($m.address_range) | $scaleStr | $($m.notes) |")
+    }
+    [void]$lines.Add("")
+    [void]$lines.Add("Architect: for each special module, (1) tell the user the exact I/O Parameter slot/module to mount, (2) create channel variables that match the 'address' column above, (3) for analog/RTD add a scaling rung (raw<->engineering) before using the value. Confirm exact U-device syntax in the controller manual.")
+    [void]$lines.Add("")
+  }
+
   $seqs = @($Board.sequences)
   if ($seqs.Count -eq 0) {
     [void]$lines.Add("(no sequences defined — add a 'sequences' entry to the spec-board JSON)")

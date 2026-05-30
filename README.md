@@ -10,7 +10,7 @@ Instead of guessing pixel coordinates, CUCP grounds actions in the
 **UIA accessibility tree, the DOM, OCR, and label matching** — and every live
 action must pass an **explicit safety gate** before it runs.
 
-[![Version](https://img.shields.io/badge/version-v2.4.0-blue.svg)](https://github.com/bagseunggwon30-cyber/cucp/releases)
+[![Version](https://img.shields.io/badge/version-v2.4.1-blue.svg)](https://github.com/bagseunggwon30-cyber/Computer-Use-Control-Plane/releases)
 [![Platform](https://img.shields.io/badge/platform-Windows%2010%2F11-0078D4.svg?logo=windows)](https://learn.microsoft.com/windows/)
 [![PowerShell](https://img.shields.io/badge/PowerShell-5.1%2B-5391FE.svg?logo=powershell)](https://learn.microsoft.com/powershell/)
 [![Tests](https://img.shields.io/badge/Pester-190%2F190-brightgreen.svg)](#-verification)
@@ -25,7 +25,7 @@ action must pass an **explicit safety gate** before it runs.
 ## TL;DR
 
 ```powershell
-git clone https://github.com/bagseunggwon30-cyber/cucp.git
+git clone https://github.com/bagseunggwon30-cyber/Computer-Use-Control-Plane.git cucp
 cd cucp
 powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1
 
@@ -43,7 +43,7 @@ cucp macro windows        # list open windows (read-only)
 
 ```powershell
 # 1. Clone
-git clone https://github.com/bagseunggwon30-cyber/cucp.git
+git clone https://github.com/bagseunggwon30-cyber/Computer-Use-Control-Plane.git cucp
 cd cucp
 
 # 2. One-click install (no admin / UAC required)
