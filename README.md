@@ -4,262 +4,276 @@
 
 **Let any AI agent operate your Windows desktop — safely, precisely, and with receipts.**
 
-AI 에이전트(Codex · Claude · Kiro · 기타 LLM)가 Windows 앱을
-**관찰 → 판단 → 조작 → 검증** 루프로 자동 제어하는 단일 control plane.
-좌표 추측 대신 **UIA 트리 · DOM · OCR · 라벨 그라운딩**으로 정확하게,
-모든 라이브 동작은 **명시적 안전 게이트**를 통과해야만 실행된다.
+A single control plane that lets AI agents (Codex · Claude · Kiro · any LLM)
+drive Windows apps through an **Observe → Think → Act → Verify** loop.
+Instead of guessing pixel coordinates, CUCP grounds actions in the
+**UIA accessibility tree, the DOM, OCR, and label matching** — and every live
+action must pass an **explicit safety gate** before it runs.
 
 [![Version](https://img.shields.io/badge/version-v2.3.1-blue.svg)](https://github.com/bagseunggwon30-cyber/cucp/releases)
 [![Platform](https://img.shields.io/badge/platform-Windows%2010%2F11-0078D4.svg?logo=windows)](https://learn.microsoft.com/windows/)
 [![PowerShell](https://img.shields.io/badge/PowerShell-5.1%2B-5391FE.svg?logo=powershell)](https://learn.microsoft.com/powershell/)
-[![Tests](https://img.shields.io/badge/Pester-190%2F190-brightgreen.svg)](#-검증-상태)
+[![Tests](https://img.shields.io/badge/Pester-190%2F190-brightgreen.svg)](#-verification)
 [![Macros](https://img.shields.io/badge/macros-109-success.svg)](references/command-reference.md)
 
-[설치](#-설치-30초) · [첫 실행](#-첫-실행-1분) · [핵심 매크로](#-핵심-매크로) · [안전 정책](#-안전--보안) · [어디에 쓰나](#-어디에-쓰나) · [문서](#-문서)
+[Install](#-install-30s) · [First run](#-first-run-1-min) · [Macros](#-core-macros) · [Safety](#-safety--security) · [Use cases](#-use-cases) · [Docs](#-documentation)
 
 </div>
 
 ---
 
-## 30초 요약
+## TL;DR
 
 ```powershell
 git clone https://github.com/bagseunggwon30-cyber/cucp.git
 cd cucp
 powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1
 
-cucp macro windows        # 열린 창 목록 (read-only)
+cucp macro windows        # list open windows (read-only)
 ```
 
-- **단일 진입점** `cucp` — 어떤 AI 에이전트든 이 한 명령으로 데스크톱을 제어
-- **109개 매크로** — 관찰 / 조작 / 검증 / CDP / OCR / UIA / 복구 / PLC 보조
-- **안전 우선** — 모든 라이브 동작은 `-AllowLiveControl` + hit-test 가드 + sensitive 차단
-- **검증됨** — Pester 190/190, 코드 실행 취약점(`Invoke-Expression`) 0건
+- **One entry point** `cucp` — any AI agent drives the desktop through this single command
+- **109 macros** — observe / actuate / verify / CDP / OCR / UIA / recovery / PLC tooling
+- **Safety first** — every live action requires `-AllowLiveControl` + hit-test guard + sensitive-action blocking
+- **Verified** — Pester 190/190, zero `Invoke-Expression` (no code-eval surface)
 
 ---
 
-## ⚡ 설치 (30초)
+## ⚡ Install (30s)
 
 ```powershell
-# 1. 클론
+# 1. Clone
 git clone https://github.com/bagseunggwon30-cyber/cucp.git
 cd cucp
 
-# 2. 원클릭 설치 (관리자 권한 불필요)
+# 2. One-click install (no admin / UAC required)
 powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1
 ```
 
-`install.ps1` 이 하는 일:
-- PowerShell 5.1+ / Windows 환경 확인
-- `cucp` 명령을 PATH 에 등록 (사용자 범위 shim, UAC 불필요)
-- `health-quick` 으로 동작 검증
+What `install.ps1` does:
+- Checks for PowerShell 5.1+ on Windows
+- Registers the `cucp` command on your PATH (user-scope shim, no UAC)
+- Verifies the install with `health-quick`
 
-> 설치를 건너뛰고 바로 쓰려면: `scripts\cucp.ps1` 을 직접 실행해도 됩니다.
-> 되돌리려면 `%LOCALAPPDATA%\Microsoft\WindowsApps\cucp.cmd` 만 삭제하면 끝.
+> Prefer not to install? Just run `scripts\cucp.ps1` directly.
+> To uninstall, delete `%LOCALAPPDATA%\Microsoft\WindowsApps\cucp.cmd` — that's it.
 
 ---
 
-## 🚀 첫 실행 (1분)
+## 🚀 First run (1 min)
 
 ```powershell
-# 관찰 — 열린 창 목록 (read-only, 안전)
+# Observe — list open windows (read-only, safe)
 cucp macro windows
 
-# 관찰 — 'Save' 라벨 후보 + 점수 근거
+# Observe — score 'Save' label candidates with reasoning
 cucp macro find-label --label "Save" --explain
 
-# 버전 — skill / cli / helper-server 통합 표시
+# Version — unified skill / cli / helper-server report
 cucp version
 
-# 조작 — 실제 클릭 (라이브: -AllowLiveControl 필수)
+# Actuate — a real click (LIVE: requires -AllowLiveControl)
 cucp -AllowLiveControl macro smart-click --label "Save" --match "Notepad"
 ```
 
-read-only 매크로는 게이트 없이 바로 동작하고, **실제로 클릭/입력하는 매크로는 `-AllowLiveControl` 을 붙여야만** 실행됩니다. 이게 CUCP 의 1번 안전 원칙입니다.
+Read-only macros run with no gate. Macros that actually click or type **only run
+when you add `-AllowLiveControl`**. That is CUCP's first safety rule.
 
 ---
 
-## 🤔 왜 CUCP 인가
+## 🤔 Why CUCP
 
-대부분의 computer-use 도구는 **스크린샷을 보고 좌표를 추정해서** 클릭합니다. 작은 버튼, 밀집한 그리드, 창이 움직이면 빗나가기 쉽습니다.
+Most computer-use tools **look at a screenshot and guess coordinates** to click.
+Small buttons, dense grids, or a window that moves — and they miss.
 
-CUCP 는 **네 가지 인식 스택을 함께** 써서 좌표 추측을 최소화합니다:
+CUCP combines **four perception stacks** to minimize coordinate guessing:
 
 ```
 Win32 API        UIA               OCR                    Chrome DevTools Protocol
    │              │                 │                          │
- window enum   accessible        ko/en/ja/zh              Electron / Chromium 앱
- & hit-test    tree + patterns   텍스트 인식              (Kiro / VS Code / Slack / Chrome)
+ window enum   accessibility     ko/en/ja/zh              Electron / Chromium apps
+ & hit-test    tree + patterns   text recognition         (Kiro / VS Code / Slack / Chrome)
 ```
 
-- **라벨로 클릭** — "Save" 버튼을 좌표가 아니라 이름/역할로 찾음
-- **UIA Pattern.Invoke** — 마우스를 안 움직이고 접근성 API 로 직접 실행
-- **CDP/DOM** — Electron 앱은 DOM 에 직접 접근 (Shadow DOM / iframe 관통)
-- **hit-test 가드** — 클릭 전에 "이 좌표가 정말 의도한 창인가" 검증
+- **Click by label** — find the "Save" button by its name/role, not a coordinate
+- **UIA Pattern.Invoke** — trigger controls through the accessibility API without moving the mouse
+- **CDP / DOM** — for Electron apps, reach into the DOM directly (through Shadow DOM / iframes)
+- **Hit-test guard** — before any click, confirm the coordinate really lands on the intended window
 
-그리고 모든 라이브 동작은 다층 안전 게이트를 통과해야 합니다 ([아래](#-안전--보안)).
+And every live action passes a layered safety gate ([below](#-safety--security)).
+
+### What are UIA and CDP?
+
+- **UIA (UI Automation)** — Windows' built-in accessibility layer (the same one screen
+  readers use). It exposes every button, menu, and field by **name and role**, so CUCP
+  can act on "the button named Save" instead of pixel `x=820, y=440`. Used for standard
+  Win32 apps (Notepad, XG5000, etc.).
+- **CDP (Chrome DevTools Protocol)** — the control channel for Chromium-based apps
+  (Kiro, VS Code, Slack, Discord, Chrome). These apps are web pages inside, so CUCP
+  reaches the **DOM element** directly — independent of screen coordinates.
 
 ---
 
-## ✨ 주요 기능
+## ✨ Features
 
-| 영역 | 기능 |
+| Area | Capability |
 |:--|:--|
-| 👁️ **관찰** | window enum, foreground 추출, UIA tree, OCR (ko/en/ja/zh) |
-| 🖱️ **조작** | UIA Pattern.Invoke, Win32 SendInput, OCR+UIA fusion, IME-safe paste |
-| ✅ **검증** | screenshot diff (픽셀 단위), hit-test guard, click-and-verify, precision-validate |
-| 🧠 **학습** | smart-click history (최근 lookback), anchor reuse 점수 |
-| 🌐 **Electron/Chrome** | CDP 통합 — DOM 직접 접근, Shadow DOM / iframe 관통, 좌표 무관 |
-| 🚑 **복구** | modal-detect → recovery-plan → recovery-run (UI 실패 복구 루프) |
-| ⚡ **속도** | daemon serve — 상주 모드에서 호출당 ~31ms (single-shot ~2s 대비) |
-| 📊 **벤치마크** | read-only benchmark (p50/p95/avg + SLO, PII 미수집) |
-| 🏭 **PLC 보조** | XG5000 / XP-Builder task-card · spec-board · ladder 진단 |
-| 🛡️ **거버넌스** | audit-summary, policy-check, vision token budget, multi-user 격리 |
+| 👁️ **Observe** | window enum, foreground extraction, UIA tree, OCR (ko/en/ja/zh) |
+| 🖱️ **Actuate** | UIA Pattern.Invoke, Win32 SendInput, OCR+UIA fusion, IME-safe paste |
+| ✅ **Verify** | pixel-level screenshot diff, hit-test guard, click-and-verify, precision-validate |
+| 🧠 **Learn** | smart-click history (recent lookback), anchor reuse scoring |
+| 🌐 **Electron/Chrome** | CDP integration — direct DOM access, Shadow DOM / iframe traversal |
+| 🚑 **Recover** | modal-detect → recovery-plan → recovery-run (UI failure recovery loop) |
+| ⚡ **Speed** | daemon serve — ~31ms per call in resident mode (vs ~2s single-shot) |
+| 📊 **Benchmark** | read-only benchmark (p50/p95/avg + SLO, no PII collected) |
+| 🏭 **PLC tooling** | LS XG5000 / XP-Builder task-card · spec-board · ladder diagnosis |
+| 🛡️ **Governance** | audit-summary, policy-check, vision token budget, multi-user isolation |
 
 ---
 
-## 🎯 핵심 매크로
+## 🎯 Core macros
 
 ```powershell
-# ── 관찰 (read-only) ──────────────────────────────────────────
-cucp macro windows                                  # Win32 창 enum (결정론적)
-cucp macro find-label --label "Save" --explain      # 라벨 후보 + 점수 근거
+# ── Observe (read-only) ───────────────────────────────────────
+cucp macro windows                                  # Win32 window enum (deterministic)
+cucp macro find-label --label "Save" --explain      # label candidates + scoring
 cucp macro ocr-find-text --text "Send"              # OCR (Windows.Media.Ocr)
-cucp macro app-profile --match Chrome --auto-probe  # 앱 자동화 전략 점수
+cucp macro app-profile --match Chrome --auto-probe  # app automation strategy score
 
-# ── 조작 (live, -AllowLiveControl 필수) ───────────────────────
+# ── Actuate (live, requires -AllowLiveControl) ────────────────
 cucp -AllowLiveControl macro click-label --label "Save"
 cucp -AllowLiveControl macro smart-click --label "Save" --match Kiro
-#     └ cascade: UIA Pattern → UIA 좌표 → icon → fusion → OCR → vision
+#     └ cascade: UIA Pattern → UIA coord → icon → fusion → OCR → vision
 cucp -AllowLiveControl macro fill-label --label "Name" --text "Alice" --enter
 cucp -AllowLiveControl macro shortcut --keys "ctrl+s"
 
-# ── Electron/Chrome — CDP/DOM (좌표 무관) ─────────────────────
-# 앱을 --remote-debugging-port=9222 로 시작 후 (references/cdp-setup.md)
+# ── Electron/Chrome — CDP/DOM (coordinate-free) ───────────────
+# Start the app with --remote-debugging-port=9222 first (references/cdp-setup.md)
 cucp macro cdp-detect
-cucp macro cdp-deep-find --text "Send" --page-match Kiro   # Shadow DOM/iframe 관통
+cucp macro cdp-deep-find --text "Send" --page-match Kiro   # through Shadow DOM/iframes
 cucp -AllowLiveControl macro cdp-smart-click --text "Send"
 
-# ── 복구 루프 ─────────────────────────────────────────────────
+# ── Recovery loop ─────────────────────────────────────────────
 cucp macro modal-detect
 cucp macro recovery-plan --failed-step "macro click-label --label Save"
 
-# ── 속도: 상주 daemon (호출당 ~31ms) ─────────────────────────
-cucp macro daemon serve            # stdin JSON-line 명령을 받는 상주 모드
+# ── Speed: resident daemon (~31ms per call) ───────────────────
+cucp macro daemon serve            # resident mode that takes JSON-line commands on stdin
 ```
 
-전체 109개 매크로는 [`references/command-reference.md`](references/command-reference.md) 참고.
+See [`references/command-reference.md`](references/command-reference.md) for all 109 macros.
 
 ---
 
-## 🛡️ 안전 & 보안
+## 🛡️ Safety & security
 
-모든 라이브 동작은 다층 게이트를 통과해야 실행됩니다:
+Every live action must pass a layered gate before it runs:
 
-| 게이트 | 동작 |
+| Gate | Behavior |
 |:--|:--|
-| 🔐 **AllowLiveControl** | 모든 조작 매크로는 `-AllowLiveControl` 없으면 차단 (exit 3) |
-| 🎯 **Hit-test guard** | 좌표 클릭은 `--target-match` / `--target-hwnd` 로 의도한 창 검증 |
-| 🔢 **Confidence floor** | low-confidence 매칭(score < 60) 자동 거부 |
-| 🚫 **Sensitive gate** | UAC / 비밀번호 / 결제 / 자격증명 화면 자동 거부 |
-| 📝 **Audit trail** | 모든 라이브 동작을 trajectory NDJSON 에 기록 |
-| 🧹 **Secret redaction** | 출력 직전 PAT / sk- / AKIA / Bearer / JWT / PEM 6종 자동 마스킹 |
-| 🔒 **Multi-user 격리** | helper-server pipe owner-only ACL + lock owner 검사 |
+| 🔐 **AllowLiveControl** | Any actuation macro is blocked (exit 3) without `-AllowLiveControl` |
+| 🎯 **Hit-test guard** | Coordinate clicks must pass `--target-match` / `--target-hwnd` window checks |
+| 🔢 **Confidence floor** | Low-confidence matches (score < 60) are auto-rejected |
+| 🚫 **Sensitive gate** | UAC / password / payment / credential screens are auto-refused |
+| 📝 **Audit trail** | Every live action is logged to a trajectory NDJSON |
+| 🧹 **Secret redaction** | PAT / sk- / AKIA / Bearer / JWT / PEM (6 patterns) masked before output |
+| 🔒 **Multi-user isolation** | helper-server pipe owner-only ACL + lock owner check |
 
-설계 원칙: `Invoke-Expression`/`iex` 사용 0건, 외부 프로세스 인자는 배열/escape 전달, 입력 길이 cap.
+Design principles: zero `Invoke-Expression`/`iex`, array/escaped args for external
+processes, bounded input lengths.
 
-### 표준 exit code
+### Standard exit codes
 
-| code | 의미 |
+| code | meaning |
 |:-:|:--|
 | `0` | ok |
-| `1` | generic failure / not_found / 입력 누락 |
-| `2` | partial / ambiguous / no_match (회복 가능) |
-| `3` | safety blocked (게이트 미통과) |
+| `1` | generic failure / not_found / missing input |
+| `2` | partial / ambiguous / no_match (recoverable) |
+| `3` | safety blocked (gate not satisfied) |
 | `124` | timeout |
 
 ---
 
-## 🏭 어디에 쓰나
+## 🏭 Use cases
 
-- **AI 에이전트 데스크톱 자동화** — Codex / Claude / Kiro 가 Windows 앱을 라벨 기반으로 안전하게 조작
-- **Electron 앱 제어** — Kiro / VS Code / Slack / Discord 를 CDP 로 DOM 직접 제어
-- **반복 GUI 워크플로** — 폼 입력, 파일 작업, 설정 변경을 검증 루프와 함께
-- **PLC 엔지니어링 보조 (LS XG5000 / XP-Builder)** — task-card · spec-board 로 디바이스/주소/요구조건 context 관리, ladder 1차 진단(STOP NC / 자기유지 / 중복 코일 / SET-RST / word-as-bit), download/RUN 전 안전 검증. 산업용 안전 게이트가 내장된 점이 범용 도구와 다른 부분.
+- **AI-agent desktop automation** — Codex / Claude / Kiro drive Windows apps via label-based, gated actions
+- **Electron app control** — operate Kiro / VS Code / Slack / Discord through the DOM via CDP
+- **Repetitive GUI workflows** — form filling, file ops, settings changes with a verify loop
+- **PLC engineering assist (LS XG5000 / XP-Builder)** — manage device/address/requirement context with task-card · spec-board, run first-pass ladder diagnosis (STOP-NC / self-hold / duplicate coils / SET-RST / word-as-bit), and gate-check before download/RUN. The built-in industrial safety gates are what set CUCP apart from general-purpose tools here.
 
 ---
 
-## ✅ 검증 상태
+## ✅ Verification
 
-| 항목 | 결과 |
+| Item | Result |
 |:--|:--|
-| Pester 회귀 | **190 / 190** |
+| Pester regression | **190 / 190** |
 | contract-verify | **8 / 8** |
 | AST parse | 6 / 6 OK |
-| 코드 실행 취약점 | `Invoke-Expression` **0건** |
+| code-eval surface | `Invoke-Expression` **0** |
 
 ```powershell
-# 회귀 테스트 직접 실행 (Pester 필요)
+# Run the regression suite yourself (Pester required)
 Invoke-Pester .\tests\cucp.Tests.ps1
 ```
 
 ---
 
-## 📁 구조
+## 📁 Layout
 
 ```
 cucp/
-├── install.ps1              # 원클릭 설치
+├── install.ps1              # one-click installer
 ├── README.md · CHANGELOG.md · SKILL.md
 ├── scripts/
-│   ├── cucp.ps1             # 메인 wrapper (단일 진입점)
-│   ├── cucp-native-helper.ps1   # Win32 + UIA + OCR + CDP (P/Invoke)
-│   ├── cucp-helper-server.ps1   # 상주 helper (named pipe IPC)
-│   ├── cucp-task-card.ps1       # XG5000 작업 카드
-│   └── cucp-spec-board.ps1      # XG5000 spec / 체크리스트 보드
-├── references/             # 상세 문서 (command-reference, cdp-setup, troubleshooting ...)
-├── skills/                 # XG5000 전용 Codex 스킬 (assistant · ladder-diagnostician)
-└── tests/                  # Pester 회귀 테스트
+│   ├── cucp.ps1                  # main wrapper (single entry point)
+│   ├── cucp-native-helper.ps1    # Win32 + UIA + OCR + CDP (P/Invoke)
+│   ├── cucp-helper-server.ps1    # resident helper (named-pipe IPC)
+│   ├── cucp-task-card.ps1        # XG5000 task card
+│   └── cucp-spec-board.ps1       # XG5000 spec / checklist board
+├── references/             # detailed docs (command-reference, cdp-setup, troubleshooting ...)
+├── skills/                 # XG5000 Codex skills (assistant · ladder-diagnostician)
+└── tests/                  # Pester regression tests
 ```
 
 ---
 
-## 🚧 한계 (정직하게)
+## 🚧 Limitations (honest)
 
-- **Windows 10/11 전용** — `Windows.Media.Ocr` · UIA · Win32 의존. macOS/Linux 는 honest-stub 만.
-- **single-shot 호출은 ~2초** — PowerShell + wrapper cold-start 비용. 빠른 경로는 `daemon serve` (호출당 ~31ms).
-- **DirectX/게임 풀스크린, DRM 화면** — 캡처 실패 가능.
-- **매우 작은 폰트(<8pt)** — OCR 정확도 저하.
-- **Cross-origin iframe** — 보안상 traversal 차단(개수만 보고).
-
----
-
-## 🗺️ 로드맵
-
-- daemon serve 를 기본 호출 경로로 자동화 (single-shot 약점 제거)
-- macOS / Linux 포팅
-- DXGI capture (게임/풀스크린)
-- multi-monitor coord-anchor 자동 재anchor
-
-자세한 변경 이력은 [`CHANGELOG.md`](CHANGELOG.md).
+- **Windows 10/11 only** — depends on `Windows.Media.Ocr` · UIA · Win32. macOS/Linux gets an honest stub only.
+- **Single-shot calls take ~2s** — PowerShell + wrapper cold start. The fast path is `daemon serve` (~31ms per call).
+- **DirectX/fullscreen games, DRM-protected screens** — capture may fail.
+- **Very small fonts (<8pt)** — OCR accuracy drops.
+- **Cross-origin iframes** — traversal is blocked for security (only the count is reported).
 
 ---
 
-## 📚 문서
+## 🗺️ Roadmap
 
-| 문서 | 설명 |
+- Make `daemon serve` the default call path (removes the single-shot penalty)
+- macOS / Linux port
+- DXGI capture (games / fullscreen)
+- Multi-monitor coord-anchor auto re-anchoring
+
+Full history in [`CHANGELOG.md`](CHANGELOG.md).
+
+---
+
+## 📚 Documentation
+
+| Doc | Description |
 |:--|:--|
-| [`CHANGELOG.md`](CHANGELOG.md) | 버전별 변경사항 |
-| [`references/command-reference.md`](references/command-reference.md) | 매크로 전체 레퍼런스 |
-| [`references/troubleshooting.md`](references/troubleshooting.md) | 진단 / 복구 / selector 점수표 |
-| [`references/cdp-setup.md`](references/cdp-setup.md) | Electron CDP 활성화 가이드 |
-| [`SKILL.md`](SKILL.md) | AI 에이전트 스킬 등록 메타 |
+| [`CHANGELOG.md`](CHANGELOG.md) | Version history |
+| [`references/command-reference.md`](references/command-reference.md) | Full macro reference |
+| [`references/troubleshooting.md`](references/troubleshooting.md) | Diagnostics / recovery / selector scoring |
+| [`references/cdp-setup.md`](references/cdp-setup.md) | Enabling Electron CDP |
+| [`SKILL.md`](SKILL.md) | AI-agent skill registration metadata |
 
 ---
 
-## 📜 라이선스
+## 📜 License
 
-별도 명시 전까지 All rights reserved. 사용/배포 문의는 저장소 이슈로.
+All rights reserved until stated otherwise. For usage/distribution, please open an issue.
 
 ---
 
@@ -267,6 +281,6 @@ cucp/
 
 **Made with 🖱️ + ⌨️ for AI agents that respect your desktop**
 
-⭐ 도움이 됐다면 Star 를 눌러주세요.
+⭐ If this helped, please star the repo.
 
 </div>
