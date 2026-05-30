@@ -1,6 +1,6 @@
 ---
 name: cucp-computer-use
-description: Use the local CUCP (Computer Use Control Plane) CLI from any Codex / Claude / Kiro project to observe, ground, and operate the user's Windows desktop at Claude Computer Use grade. Single entry point is `scripts/cucp.ps1`. Trigger on cucp, CUP, computer use, computer-use, Windows control, desktop control, appshot, snapshot, live benchmark, desktop benchmark, screen control, GUI automation, PC/app control, "컴퓨터 유즈", "컴퓨터 사용", "컴퓨터 조작", "내 컴퓨터 조작", "내 컴퓨터를 조작", "내 PC 조작", "앱 조작", "윈도우 조작", "화면 조작", "데스크톱 자동화", "자동화 실행", "GUI 자동화", "라벨 클릭", "버튼 클릭해줘", or whenever the user asks Codex to inspect, click, type, drag, scroll, switch apps, follow a goal, or autonomously operate the local Windows desktop. v2.1.1 macros (full surface): version, daemon, mouse-verify, cdp-prosemirror-insert, cdp-deep-find, modal-detect, recovery-plan, recovery-run, precision-validate, benchmark, release-notes, ime-paste, safe-type-ime, recorder, audit-summary, policy-check, task-card, spec-board.
+description: Use the local CUCP (Computer Use Control Plane) CLI from any Codex / Claude / Kiro project to observe, ground, and operate the user's Windows desktop at Claude Computer Use grade. Single entry point is `scripts/cucp.ps1`. Trigger on cucp, CUP, computer use, computer-use, Windows control, desktop control, appshot, snapshot, live benchmark, desktop benchmark, screen control, GUI automation, PC/app control, "컴퓨터 유즈", "컴퓨터 사용", "컴퓨터 조작", "내 컴퓨터 조작", "내 컴퓨터를 조작", "내 PC 조작", "앱 조작", "윈도우 조작", "화면 조작", "데스크톱 자동화", "자동화 실행", "GUI 자동화", "라벨 클릭", "버튼 클릭해줘", or whenever the user asks Codex to inspect, click, type, drag, scroll, switch apps, follow a goal, or autonomously operate the local Windows desktop. v2.3.0 macros (full surface): version, daemon, mouse-verify, cdp-prosemirror-insert, cdp-deep-find, modal-detect, recovery-plan, recovery-run, precision-validate, benchmark, release-notes, ime-paste, safe-type-ime, recorder, audit-summary, policy-check, task-card, spec-board.
 ---
 
 # CUCP Computer Use (Claude-grade)
@@ -113,11 +113,11 @@ powershell -NoProfile -ExecutionPolicy Bypass -File C:\Users\K\.codex\skills\cuc
 
 **OCR (Windows.Media.Ocr — 브라우저 캔버스 / 이미지 표면용)**: `macro ocr-image --path <png>` / `macro ocr-screen --region x,y,w,h` / `macro ocr-find-text --text "Send" --match contains|fuzzy --target-match <window>` / `-AllowLiveControl macro ocr-click --text "Send" --min-score 70`. OCR candidates include line/word/2~3-word n-grams, but single-word searches skip n-grams for lower lag and tie-break toward smaller word/ngram boxes for steadier click coordinates. `smart-click` keeps fast UIA paths ahead of OCR history by default (`--prefer-history` to override, `--no-ocr` to disable). `references/command-reference.md` 의 OCR 섹션 참고.
 
-**OCR+UIA fusion + screen verify + history (v0.9.0~v1.1.0)**: `macro ocr-uia-fuse --text "Send"` (fusion 가이드, read-only) / `-AllowLiveControl macro ocr-uia-invoke --text "Send"` (Name 비어도 AutomationId 로 invoke) / `macro screenshot-diff --before a.png --after b.png [--ignore-region "x,y,w,h"]` / `smart-click --verify-screen-changed --retry-on-no-change 2` / `macro history stats / show / clear` (`--no-history` 로 비활성). OCR/icon fallback clicks use `ClickRefine uia-safe`: just before the physical click, CUCP checks the UIA element under the point and may shift to Windows UIA's native `ClickablePoint` first, then a safe rect center fallback, while preserving target-window hit-test guards.
+**OCR+UIA fusion + screen verify + history**: `macro ocr-uia-fuse --text "Send"` (fusion 가이드, read-only) / `-AllowLiveControl macro ocr-uia-invoke --text "Send"` (Name 비어도 AutomationId 로 invoke) / `macro screenshot-diff --before a.png --after b.png [--ignore-region "x,y,w,h"]` / `smart-click --verify-screen-changed --retry-on-no-change 2` / `macro history stats / show / clear` (`--no-history` 로 비활성). OCR/icon fallback clicks use `ClickRefine uia-safe`: just before the physical click, CUCP checks the UIA element under the point and may shift to Windows UIA's native `ClickablePoint` first, then a safe rect center fallback, while preserving target-window hit-test guards.
 
-**hit-test guard + Electron/Chrome CDP (v1.2.0~v1.3.0)**: `macro hit-test --x N --y N --target-match Kiro` (좌표 검증 + UIA 보정 후보 표시) / `safe-type` (Win32 앱용). **CDP/DOM**: `macro cdp-detect` / `cdp-eval --expr` / `-AllowLiveControl macro cdp-type --selector "textarea" --text "msg" --press-enter` / `cdp-smart-click --text "Send"` / `cdp-smart-type --label "Message" --text "msg"` (DOM 직접). `smart-click --allow-cdp` 또는 `--cdp-page-match`로 Stage 0 opt-in. 활성화: `--remote-debugging-port=9222` (`references/cdp-setup.md`).
+**hit-test guard + Electron/Chrome CDP**: `macro hit-test --x N --y N --target-match Kiro` (좌표 검증 + UIA 보정 후보 표시) / `safe-type` (Win32 앱용). **CDP/DOM**: `macro cdp-detect` / `cdp-eval --expr` / `-AllowLiveControl macro cdp-type --selector "textarea" --text "msg" --press-enter` / `cdp-smart-click --text "Send"` / `cdp-smart-type --label "Message" --text "msg"` (DOM 직접). `smart-click --allow-cdp` 또는 `--cdp-page-match`로 Stage 0 opt-in. 활성화: `--remote-debugging-port=9222` (`references/cdp-setup.md`).
 
-**v1.4.0 신규 — DOM bridge v2 + IME + recovery + benchmark + packaging**:
+**DOM bridge v2 + IME + recovery + benchmark + packaging**:
 ```powershell
 # DOM bridge v2 traversal report (Shadow DOM + iframe)
 & <wrapper> macro cdp-deep-find --text "Send" --page-match Kiro
@@ -144,7 +144,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File C:\Users\K\.codex\skills\cuc
 & <wrapper> macro release-notes --since 1.3.0 --json-only
 ```
 
-**v1.4.0 보안 보완**: `release-notes` 출력 직전 GitHub PAT / OpenAI sk- / AWS AKIA / Bearer / JWT / PEM 6종 자동 redact (`[REDACTED:tag]`). `recovery-run` 의 live action 은 `--confirm-sensitive` 강제. `benchmark` 측정 결과에 입력 텍스트/PII 미포함.
+**보안 보완**: `release-notes` 출력 직전 GitHub PAT / OpenAI sk- / AWS AKIA / Bearer / JWT / PEM 6종 자동 redact (`[REDACTED:tag]`). `recovery-run` 의 live action 은 `--confirm-sensitive` 강제. `benchmark` 측정 결과에 입력 텍스트/PII 미포함.
 
 ## Diagnostics & Performance
 

@@ -1,5 +1,26 @@
 # CUCP Changelog
 
+## v2.3.1 - One-click install + README 정비 (2026-05-30)
+
+### Added
+
+- **`install.ps1`** — 원클릭 설치 스크립트. PowerShell/Windows 환경 점검 →
+  `cucp` 명령 PATH shim 생성(사용자 범위, UAC 불필요) → `health-quick` 검증 →
+  다음 단계 안내. 되돌리기는 shim 파일 1개 삭제. `git clone` 후 한 줄로 설치 완료.
+
+### Changed
+
+- **README 전면 재작성** — "30초 요약 → 설치 → 첫 실행 → 왜 CUCP 인가" 흐름으로 재구성.
+  옛 버전 꼬리표(v1.4.0 신규 등) 및 내부 작업 흔적 제거, 매크로 수/검증 수치 최신화.
+- **SKILL.md 버전 표기 통일** — 본문에 흩어져 있던 `v0.9.0~v1.4.0` 꼬리표를 제거하고
+  최신 버전 언급을 단일화. 기능 그룹 이름은 유지.
+
+### Versions
+
+- skill **2.3.1** · helper-server 2.0.0 · cli backend 1.0.0 (3 컴포넌트 독립 버전)
+
+---
+
 ## v2.3.0 - Daemon serve: single-shot 가속 정공법 (2026-05-30)
 
 ### 배경 (실측으로 밝힌 진실)
