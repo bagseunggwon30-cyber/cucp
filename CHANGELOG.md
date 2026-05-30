@@ -54,7 +54,7 @@ child spawn 비용(~500ms)만 줄이지 PowerShell/wrapper cold-start(~1.5s)는 
 - Added `app-profile` auto-loading of `spec_board` for PLC/SCADA-like windows.
 - Added nested Codex skill `skills/xg5000-ladder-diagnostician/` with deterministic ladder diagnosis helper script.
 
-### Security & Refactor (정본 정리 단계, 2026-05-30)
+### Security & Refactor (2026-05-30)
 
 - **cassette BOM 회귀 수정**: `live-cassette-runner.ps1` / `live-verify-summary.ps1` 가
   `Set-Content -Encoding UTF8` (PowerShell 5.x 에서 BOM 부착) 로 cassette JSON 을 저장해
@@ -63,9 +63,9 @@ child spawn 비용(~500ms)만 줄이지 PowerShell/wrapper cold-start(~1.5s)는 
   cassette 10개의 BOM 도 제거. contract-verify 7/8 → 8/8 복구.
 - **무바운드 `WaitForExit()` 제거**: `Invoke-Cucp` 의 child node 프로세스 두 번째 대기를
   `WaitForExit()` → `WaitForExit(5000)` 로 바운드 (이론상 핸들 잔류 시 행(hang) 위험 차단).
-- **중복 함수 정의 정리**: 외부 업데이트본 병합 잔재였던 `Write-WrapperLog` 중복 정의 제거
-  (라인 201 정의 유지). `Invoke-MacroClickPoint` 단순(가드 없는) 버전에 죽은 코드 명시 주석 —
-  실제 동작하는 정의는 hit-test/micro-refine/anchor-history 가드를 모두 갖춘 뒤쪽 버전.
+- **중복 함수 정의 정리**: `Write-WrapperLog` 중복 정의 제거 (라인 201 정의 유지).
+  `Invoke-MacroClickPoint` 단순(가드 없는) 버전에 죽은 코드 명시 주석 — 실제 동작하는
+  정의는 hit-test/micro-refine/anchor-history 가드를 모두 갖춘 뒤쪽 버전.
 - **미구현 매크로 정직 처리**: `process` / `registry` / `notify` / `multi-select` /
   `multi-edit` / `scrape` / `dom-snapshot` 가 dispatcher 에 광고됐으나 본체 미구현이라
   호출 시 raw "함수를 인식할 수 없습니다" 런타임 에러가 나던 것을, 공통 헬퍼
