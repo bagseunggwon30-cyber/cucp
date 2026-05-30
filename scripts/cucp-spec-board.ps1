@@ -1,6 +1,6 @@
 ﻿[CmdletBinding(PositionalBinding = $false)]
 param(
-  [ValidateSet("open","show","ensure","path","check","uncheck","ladder","markdown","clear")]
+  [ValidateSet("open","show","ensure","path","check","uncheck","ladder","markdown","sequence","clear")]
   [string]$Mode = "open",
   [string]$Path,
   [string]$TaskId
@@ -52,6 +52,35 @@ function New-DefaultSpecBoard {
       [pscustomobject]@{ address = "P0040"; name = "MOTOR_RUN"; type = "bit"; direction = "output"; description = "모터 운전 출력 (XBE-TN16A)" },
       [pscustomobject]@{ address = "D0100"; name = "TARGET_SPEED"; type = "word"; direction = "internal"; description = "목표 속도 레지스터" }
     )
+    # ── 자산 3: 정수형 스텝 제어(Word State Machine) 시퀀스 정의 ──────────────
+    # 각 step 은 레더 생성(자산 1)과 검증(자산 2)에 필요한 모든 정보를 담는다.
+    # 이 sequences 가 "단일 진실 소스(contract)" — 아키텍트는 이걸 해석만 하고,
+    # 검증기는 생성된 레더가 이걸 지켰는지 대조한다.
+    # 스텝 번호 컨벤션: 0 = IDLE(대기), 900 = FAULT(결함), 본 공정은 10 간격(중간삽입 여지).
+    sequences = @(
+      [pscustomobject]@{
+        id = "MAIN"
+        state_word = "D1000"          # 이 시퀀스의 상태 레지스터 (단일!). 단계 제어는 오직 이 워드로만.
+        timeout_timer = "T0000"       # 공통 타임아웃 타이머 (스텝마다 쪼개지 않음)
+        timeout_ms = 30000            # 시퀀스 기본 타임아웃
+        fault_step = 900              # 타임아웃/결함 시 이동할 스텝
+        fault_record = "D1002"        # 결함 발생 당시 스텝 번호를 저장할 워드 (사후 추적)
+        init = [pscustomobject]@{
+          reset_to = 0                # 전원 첫 스캔 / E-Stop 시 강제할 스텝
+          estop_input = "X_ESTOP"     # 비상정지 입력 심볼 (device_map 또는 글로벌)
+          auto_condition = "M_AUTO_MODE"  # 자동 모드 게이트 (이 조건일 때만 시퀀스 진행)
+          first_scan_relay = "F00099" # first-scan 특수릴레이 (기종별 다름 — 매뉴얼 확인 주석 대상)
+        }
+        steps = @(
+          [pscustomobject]@{ step = 0;   name = "IDLE";    outputs = @();             interlocks = @();                 transition = [pscustomobject]@{ to = 10;  when = "X_START AND M_AUTO_MODE" } },
+          [pscustomobject]@{ step = 10;  name = "A_ASM";   outputs = @("M_ASM_RUN");  interlocks = @("M_GUARD_CLOSED"); transition = [pscustomobject]@{ to = 20;  when = "X_ASM_DONE" };  timeout_ms = 10000 },
+          [pscustomobject]@{ step = 20;  name = "B_WASH";  outputs = @("M_WASH_RUN"); interlocks = @();                 transition = [pscustomobject]@{ to = 30;  when = "T_WASH_DONE" } },
+          [pscustomobject]@{ step = 30;  name = "C_DRY";   outputs = @("M_DRY_RUN");  interlocks = @();                 transition = [pscustomobject]@{ to = 40;  when = "X_DRY_DONE" } },
+          [pscustomobject]@{ step = 40;  name = "D_EJECT"; outputs = @("M_EJECT");    interlocks = @();                 transition = [pscustomobject]@{ to = 0;   when = "X_EJECT_DONE" } },
+          [pscustomobject]@{ step = 900; name = "FAULT";   outputs = @();             interlocks = @();                 transition = [pscustomobject]@{ to = 0;   when = "X_RESET" } }
+        )
+      }
+    )
     tasks = @(
       [pscustomobject]@{ id = "XG-001"; title = "프로젝트 생성 (CPU 모델/통신 기준)"; done = $false },
       [pscustomobject]@{ id = "XG-002"; title = "I/O 파라미터 등록"; done = $false },
@@ -97,7 +126,62 @@ function Normalize-SpecBoard {
     })
   }
   Set-BoardValue -Board $Board -Name "tasks" -Value @($tasks)
-  Set-BoardValue -Board $Board -Name "schema" -Value "cucp.spec-board/v1"
+
+  # ── sequences 정규화 (자산 3) ──────────────────────────────────────────────
+  # 구버전(sequences 없는 v1) JSON 도 graceful 흡수: 없으면 빈 배열로 둔다.
+  # 각 step 의 outputs/interlocks 는 항상 배열로, transition 은 항상 {to, when} 형태로 보정.
+  $normSeqs = New-Object System.Collections.ArrayList
+  foreach ($seq in @($Board.sequences)) {
+    if (-not $seq) { continue }
+    $normSteps = New-Object System.Collections.ArrayList
+    foreach ($st in @($seq.steps)) {
+      if (-not $st) { continue }
+      $toVal = $null; $whenVal = ""
+      if ($st.transition) {
+        if ($st.transition.PSObject.Properties.Name -contains "to") { $toVal = $st.transition.to }
+        if ($st.transition.PSObject.Properties.Name -contains "when") { $whenVal = "$($st.transition.when)" }
+      }
+      $stepObj = [ordered]@{
+        step = [int]$st.step
+        name = "$($st.name)"
+        outputs = @(@($st.outputs) | Where-Object { $_ } | ForEach-Object { "$_" })
+        interlocks = @(@($st.interlocks) | Where-Object { $_ } | ForEach-Object { "$_" })
+        transition = [pscustomobject]@{ to = $toVal; when = $whenVal }
+      }
+      if ($st.PSObject.Properties.Name -contains "timeout_ms" -and $st.timeout_ms) {
+        $stepObj["timeout_ms"] = [int]$st.timeout_ms
+      }
+      [void]$normSteps.Add([pscustomobject]$stepObj)
+    }
+    $initObj = $null
+    if ($seq.init) {
+      $initObj = [pscustomobject]@{
+        reset_to = if ($seq.init.PSObject.Properties.Name -contains "reset_to") { [int]$seq.init.reset_to } else { 0 }
+        estop_input = "$($seq.init.estop_input)"
+        auto_condition = "$($seq.init.auto_condition)"
+        first_scan_relay = "$($seq.init.first_scan_relay)"
+      }
+    }
+    $seqObj = [ordered]@{
+      id = "$($seq.id)"
+      state_word = "$($seq.state_word)"
+      timeout_timer = "$($seq.timeout_timer)"
+      timeout_ms = if ($seq.PSObject.Properties.Name -contains "timeout_ms" -and $seq.timeout_ms) { [int]$seq.timeout_ms } else { 0 }
+      fault_step = if ($seq.PSObject.Properties.Name -contains "fault_step") { [int]$seq.fault_step } else { 900 }
+      fault_record = "$($seq.fault_record)"
+      init = $initObj
+      steps = @($normSteps)
+    }
+    [void]$normSeqs.Add([pscustomobject]$seqObj)
+  }
+  Set-BoardValue -Board $Board -Name "sequences" -Value @($normSeqs)
+
+  # schema 는 sequences 가 1개 이상이면 v2, 아니면 v1 호환 표기 유지.
+  if (@($normSeqs).Count -gt 0) {
+    Set-BoardValue -Board $Board -Name "schema" -Value "cucp.spec-board/v2"
+  } else {
+    Set-BoardValue -Board $Board -Name "schema" -Value "cucp.spec-board/v1"
+  }
   Set-BoardValue -Board $Board -Name "source" -Value "cucp-spec-board"
   Set-BoardValue -Board $Board -Name "updated_at" -Value (Get-Date).ToString("o")
   return $Board
@@ -123,7 +207,8 @@ function Save-SpecBoard {
   }
   $normalized = Normalize-SpecBoard -Board $Board
   $json = $normalized | ConvertTo-Json -Depth 16
-  $utf8Bom = New-Object System.Text.UTF8Encoding($true)
+  # BOM 없는 UTF-8 로 저장 (다른 도구의 no_utf8_bom 계약 검사와 일관성 유지).
+  $utf8Bom = New-Object System.Text.UTF8Encoding($false)
   $lastError = $null
   for ($i = 0; $i -lt 6; $i++) {
     try {
@@ -212,6 +297,54 @@ function Render-LadderPlan {
   return ($lines -join "`r`n")
 }
 
+# ── 자산 3↔1 연동: 시퀀스를 아키텍트 프롬프트가 소비하기 좋은 형태로 렌더 ──────
+# `spec-board sequence` 모드가 호출. 정수형 스텝 머신 정의를 표로 보여주고,
+# 아키텍트가 변환할 때 참조할 contract 요약을 함께 출력한다.
+function Render-SequencePlan {
+  param([psobject]$Board)
+  $lines = New-Object System.Collections.ArrayList
+  [void]$lines.Add("# Word State Machine sequences for $($Board.title)")
+  [void]$lines.Add("")
+  $seqs = @($Board.sequences)
+  if ($seqs.Count -eq 0) {
+    [void]$lines.Add("(no sequences defined — add a 'sequences' entry to the spec-board JSON)")
+    return ($lines -join "`r`n")
+  }
+  foreach ($seq in $seqs) {
+    [void]$lines.Add("## Sequence: $($seq.id)")
+    [void]$lines.Add("- state_word    : $($seq.state_word)   (single register — all step control goes through this)")
+    [void]$lines.Add("- timeout_timer : $($seq.timeout_timer)  (common timeout, not split per step)")
+    [void]$lines.Add("- timeout_ms    : $($seq.timeout_ms)")
+    [void]$lines.Add("- fault_step    : $($seq.fault_step)   (go here on timeout/fault)")
+    [void]$lines.Add("- fault_record  : $($seq.fault_record)  (stores the step number where the fault occurred)")
+    if ($seq.init) {
+      [void]$lines.Add("- init.reset_to        : $($seq.init.reset_to)")
+      [void]$lines.Add("- init.estop_input     : $($seq.init.estop_input)")
+      [void]$lines.Add("- init.auto_condition  : $($seq.init.auto_condition)")
+      [void]$lines.Add("- init.first_scan_relay: $($seq.init.first_scan_relay)  (controller-specific — confirm in manual)")
+    }
+    [void]$lines.Add("")
+    [void]$lines.Add("| step | name | outputs | interlocks | next | transition-when |")
+    [void]$lines.Add("| ---: | :--- | :--- | :--- | ---: | :--- |")
+    foreach ($st in @($seq.steps)) {
+      $outs = (@($st.outputs) -join ", ")
+      $itlk = (@($st.interlocks) -join ", ")
+      $to = if ($st.transition) { "$($st.transition.to)" } else { "" }
+      $when = if ($st.transition) { "$($st.transition.when)" } else { "" }
+      [void]$lines.Add("| $($st.step) | $($st.name) | $outs | $itlk | $to | $when |")
+    }
+    [void]$lines.Add("")
+  }
+  [void]$lines.Add("## Architect contract (how to convert this to ladder)")
+  [void]$lines.Add("- Rule 0 (init)   : first scan OR estop ON  ->  MOV <reset_to> <state_word>")
+  [void]$lines.Add("- Rule E (estop)  : estop ON  ->  MOV <reset_to> <state_word>  (highest priority, above interlocks)")
+  [void]$lines.Add("- Rule T (trans)  : [= state_word step] AND (transition.when)  ->  MOV transition.to state_word")
+  [void]$lines.Add("- Rule O (output) : bottom of ladder, each output ONCE: [= state_word step] AND interlocks AND NOT estop -> ( ) output")
+  [void]$lines.Add("- Rule W (timeout): while state_word <> reset_to, run common timer; timer done -> MOV fault_step state_word + record step")
+  [void]$lines.Add("- Forbidden       : per-step M-bit SET/RST spaghetti, duplicate coils, output coils in the middle of logic")
+  return ($lines -join "`r`n")
+}
+
 if ($Mode -eq "path") {
   [Console]::Out.WriteLine($Path)
   return
@@ -255,6 +388,12 @@ if ($Mode -eq "markdown") {
 if ($Mode -eq "ladder") {
   $board = Read-SpecBoard
   [Console]::Out.WriteLine((Render-LadderPlan -Board $board))
+  return
+}
+
+if ($Mode -eq "sequence") {
+  $board = Read-SpecBoard
+  [Console]::Out.WriteLine((Render-SequencePlan -Board $board))
   return
 }
 

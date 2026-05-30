@@ -176,7 +176,7 @@ $Script:InvokeTimeoutMs = [Math]::Max(1000, $InvokeTimeoutMs)
 # Get-CucpVersionReport 가 이 상수 + cli/package.json + helper-server 헤더를 합쳐
 # `cucp.version/v1` envelope 으로 통합 출력.
 # v2.3.0: daemon serve (single-shot 가속 정공법) + autostart(v2.2.0) 포함.
-$Script:SkillVersion = "2.3.1"
+$Script:SkillVersion = "2.4.0"
 
 # ----- platform detection (v1.9.0 honest stub) -----------------------------
 # CUCP 의 actuation / OCR / UIA 는 Windows 에 종속 (Windows.Media.Ocr, P/Invoke,
@@ -2913,13 +2913,19 @@ function Invoke-MacroSpecBoard {
       [Console]::Out.WriteLine(($raw -join "`n"))
       return 0
     }
+    "sequence" {
+      # 자산 3↔1 연동: 정수형 스텝 머신 시퀀스를 아키텍트 프롬프트가 소비할 표/contract 로 출력.
+      $raw = Invoke-SpecBoardScript -Mode "sequence"
+      [Console]::Out.WriteLine(($raw -join "`n"))
+      return 0
+    }
     "clear" {
       $raw = Invoke-SpecBoardScript -Mode "clear"
       [Console]::Out.WriteLine(($raw -join "`n"))
       return 0
     }
     default {
-      [Console]::Out.WriteLine("Usage: macro spec-board open|show|ensure|path|check|uncheck|ladder|markdown|clear [--id XG-001]")
+      [Console]::Out.WriteLine("Usage: macro spec-board open|show|ensure|path|check|uncheck|ladder|markdown|sequence|clear [--id XG-001]")
       return 2
     }
   }

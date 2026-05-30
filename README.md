@@ -10,7 +10,7 @@ Instead of guessing pixel coordinates, CUCP grounds actions in the
 **UIA accessibility tree, the DOM, OCR, and label matching** — and every live
 action must pass an **explicit safety gate** before it runs.
 
-[![Version](https://img.shields.io/badge/version-v2.3.1-blue.svg)](https://github.com/bagseunggwon30-cyber/cucp/releases)
+[![Version](https://img.shields.io/badge/version-v2.4.0-blue.svg)](https://github.com/bagseunggwon30-cyber/cucp/releases)
 [![Platform](https://img.shields.io/badge/platform-Windows%2010%2F11-0078D4.svg?logo=windows)](https://learn.microsoft.com/windows/)
 [![PowerShell](https://img.shields.io/badge/PowerShell-5.1%2B-5391FE.svg?logo=powershell)](https://learn.microsoft.com/powershell/)
 [![Tests](https://img.shields.io/badge/Pester-190%2F190-brightgreen.svg)](#-verification)

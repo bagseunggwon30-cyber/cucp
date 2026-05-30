@@ -232,10 +232,98 @@ if ([string]::IsNullOrWhiteSpace($text)) {
     }
   }
 
+  # ── Word State Machine checks (자산 2 ↔ 자산 3 대조) ────────────────────────
+  # spec-board 에 sequences 가 있으면, 생성된 레더가 정수형 스텝 제어 규칙을 지켰는지
+  # contract(JSON) 기준으로 검증한다. sequences 가 없으면 이 블록은 통째로 skip.
+  foreach ($seq in @($board.sequences)) {
+    if (-not $seq) { continue }
+    $sw = "$($seq.state_word)".ToUpperInvariant()
+    if (-not $sw) { continue }
+    $swEsc = [regex]::Escape($sw)
+
+    # STEP030 / STEP031 / STEP040: init / estop / timeout 룽 존재 검사
+    $resetTo = if ($seq.init -and ($seq.init.PSObject.Properties.Name -contains "reset_to")) { [int]$seq.init.reset_to } else { 0 }
+    $hasInitReset = [regex]::IsMatch($textUpper, "MOV\s+$resetTo\s+$swEsc")
+    if (-not $hasInitReset) {
+      Add-Finding -Findings $findings -Severity "high" -Code "STEP030" `
+        -Message "No init/first-scan reset rung found (expected MOV $resetTo $sw on first scan)." `
+        -Principle "Without forcing the state word to a known step on power-up, the sequence can start mid-cycle on garbage data." `
+        -Fix "Add a first-scan rung: first scan -> MOV $resetTo $sw."
+    }
+    $estop = "$($seq.init.estop_input)".ToUpperInvariant()
+    if ($estop) {
+      $estopEsc = [regex]::Escape($estop)
+      if (-not [regex]::IsMatch($textUpper, "$estopEsc")) {
+        Add-Finding -Findings $findings -Severity "high" -Code "STEP031" `
+          -Message "E-Stop input $estop is not referenced anywhere in the ladder." `
+          -Principle "E-Stop must force the state word to the safe step every scan, above interlocks. Missing it is an industrial safety gap." `
+          -Fix "Add a top-priority rung: $estop ON -> MOV $resetTo $sw, and AND NOT $estop into every output."
+      }
+    }
+    $timer = "$($seq.timeout_timer)".ToUpperInvariant()
+    if ($timer) {
+      $timerEsc = [regex]::Escape($timer)
+      if (-not [regex]::IsMatch($textUpper, "$timerEsc")) {
+        Add-Finding -Findings $findings -Severity "medium" -Code "STEP040" `
+          -Message "Common timeout timer $timer is not used in the ladder." `
+          -Principle "A single common timeout (active while state word <> reset) catches a stuck step; per-step timers are harder to maintain." `
+          -Fix "Add a common timeout: while $sw <> $resetTo run $timer; on done MOV $($seq.fault_step) $sw."
+      }
+    }
+
+    # STEP020: transition.to 가 실제 존재하는 스텝인지
+    $stepNums = @(@($seq.steps) | ForEach-Object { [int]$_.step })
+    foreach ($st in @($seq.steps)) {
+      if (-not $st.transition) { continue }
+      $toVal = $st.transition.to
+      if ($null -ne $toVal -and ($stepNums -notcontains [int]$toVal)) {
+        Add-Finding -Findings $findings -Severity "high" -Code "STEP020" `
+          -Message "Step $($st.step) ($($st.name)) transitions to step $toVal, which is not defined in the sequence." `
+          -Principle "A transition target that does not exist leaves the machine in a dead state." `
+          -Fix "Define step $toVal or fix the transition target."
+      }
+    }
+
+    # STEP010 / STEP011: 각 output 이 [= state_word N] 분리로, 중복 코일 없이 구동되는지
+    $allOutputs = @()
+    foreach ($st in @($seq.steps)) { $allOutputs += @($st.outputs) }
+    $allOutputs = @($allOutputs | Where-Object { $_ } | ForEach-Object { "$_".ToUpperInvariant() } | Select-Object -Unique)
+    foreach ($out in $allOutputs) {
+      $outEsc = [regex]::Escape($out)
+      # 코일 등장 횟수 (중복 코일 검사)
+      $coilCount = ([regex]::Matches($textUpper, "\(\s*\)\s*$outEsc|\bOUT\s+$outEsc\b")).Count
+      if ($coilCount -gt 1) {
+        Add-Finding -Findings $findings -Severity "high" -Code "STEP011" `
+          -Message "Output $out is driven by $coilCount coils (duplicate coil)." `
+          -Principle "In a Word State Machine each output must be one coil; OR the [= state_word N] comparisons into a single rung instead." `
+          -Fix "Merge into one coil: ([= $sw a] OR [= $sw b] ...) AND interlocks -> ( ) $out."
+      }
+      # 출력 분리 검사: 출력 코일이 있는데 state_word 비교가 같은 줄/근처에 없으면 경고
+      if ($coilCount -ge 1) {
+        $coilLine = ($textUpper -split "(`r`n|`n|`r)" | Where-Object { $_ -match "\(\s*\)\s*$outEsc|\bOUT\s+$outEsc\b" } | Select-Object -First 1)
+        if ($coilLine -and ($coilLine -notmatch "=\s*$swEsc")) {
+          Add-Finding -Findings $findings -Severity "high" -Code "STEP010" `
+            -Message "Output $out coil is not gated by a [= $sw N] comparison (output separation violated)." `
+            -Principle "Outputs must be driven only at the bottom of the ladder via [= state_word step], not from logic in the middle." `
+            -Fix "Drive $out as: [= $sw <step>] AND interlocks AND NOT estop -> ( ) $out."
+        }
+      }
+    }
+  }
+
+  # STEP050: 트랙 제어(M비트 SET/RST 도배) 패턴 감지 — 스텝 제어 권유
+  $mSetRst = ([regex]::Matches($textUpper, '\b(SET|RST|RESET)\s+M\d{1,5}\b')).Count
+  if ($mSetRst -ge 4 -and @($board.sequences).Count -gt 0) {
+    Add-Finding -Findings $findings -Severity "medium" -Code "STEP050" `
+      -Message "Found $mSetRst M-bit SET/RST operations while a Word State Machine sequence is defined." `
+      -Principle "Mixing per-bit SET/RST track control with a state-word design reintroduces the spaghetti the integer step machine was meant to remove." `
+      -Fix "Replace M-bit SET/RST step flags with MOV <step> $($board.sequences[0].state_word) transitions."
+  }
+
   # A clean first pass still needs XG5000-native checks before live changes.
   if ($findings.Count -eq 0) {
     Add-Finding -Findings $findings -Severity "ok" -Code "NO_BASIC_FAULT_FOUND" `
-      -Message "No basic self-hold, duplicate coil, SET/RST, or word-as-bit fault was found in the text check." `
+      -Message "No basic self-hold, duplicate coil, SET/RST, word-as-bit, or Word-State-Machine fault was found in the text check." `
       -Principle "This is only a first-pass text diagnosis; actual XG5000 rung layout and I/O parameters still need verification." `
       -Fix "Verify the XG5000 screen, I/O parameters, module slots, and physical safety state."
   }
@@ -243,7 +331,7 @@ if ([string]::IsNullOrWhiteSpace($text)) {
 
 # Report format is intentionally simple so Codex can read it back or save it in notes.
 $report = [pscustomobject]@{
-  schema = "xg5000.ladder-diagnosis/v1"
+  schema = "xg5000.ladder-diagnosis/v2"
   title = "$($board.title)"
   generated_at = (Get-Date).ToString("o")
   spec_board_path = $SpecBoardPath
