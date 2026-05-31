@@ -37,7 +37,6 @@ Describe "cucp fast smoke - syntax" {
       "scripts\cucp.ps1",
       "scripts\cucp-native-helper.ps1",
       "scripts\cucp-helper-server.ps1",
-      "scripts\cucp-spec-board.ps1",
       "references\live-cassette-runner.ps1",
       "references\live-verify-summary.ps1"
     )
@@ -93,19 +92,5 @@ Describe "cucp fast smoke - wrapper surface" {
     $policy = Invoke-CucpFast -ArgList @("-Quiet", "-Brief", "macro", "policy-check", "--action", "click-label")
     $policy.ExitCode | Should Be 0
     ($policy.Raw -match "require_confirm") | Should Be $true
-  }
-
-  It "spec-board ensure returns the XG5000 context schema" {
-    $r = Invoke-CucpFast -ArgList @("-Quiet", "macro", "spec-board", "ensure")
-    $r.ExitCode | Should Be 0
-    $obj = ConvertFrom-CucpJson $r.Raw
-    ($null -ne $obj) | Should Be $true
-    $obj.schema | Should Be "cucp.spec-board/v1"
-  }
-
-  It "spec-board ladder emits a deterministic draft" {
-    $r = Invoke-CucpFast -ArgList @("-Quiet", "macro", "spec-board", "ladder")
-    $r.ExitCode | Should Be 0
-    ($r.Raw -match "Rung 1: motor self-hold") | Should Be $true
   }
 }

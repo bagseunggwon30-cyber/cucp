@@ -1,6 +1,6 @@
 ---
 name: cucp-computer-use
-description: Use the local CUCP (Computer Use Control Plane) CLI from any Codex / Claude / Kiro project to observe, ground, and operate the user's Windows desktop at Claude Computer Use grade. Single entry point is `scripts/cucp.ps1`. Trigger on cucp, CUP, computer use, computer-use, Windows control, desktop control, appshot, snapshot, live benchmark, desktop benchmark, screen control, GUI automation, PC/app control, "컴퓨터 유즈", "컴퓨터 사용", "컴퓨터 조작", "내 컴퓨터 조작", "내 컴퓨터를 조작", "내 PC 조작", "앱 조작", "윈도우 조작", "화면 조작", "데스크톱 자동화", "자동화 실행", "GUI 자동화", "라벨 클릭", "버튼 클릭해줘", or whenever the user asks Codex to inspect, click, type, drag, scroll, switch apps, follow a goal, or autonomously operate the local Windows desktop. v2.3.0 macros (full surface): version, daemon, mouse-verify, cdp-prosemirror-insert, cdp-deep-find, modal-detect, recovery-plan, recovery-run, precision-validate, benchmark, release-notes, ime-paste, safe-type-ime, recorder, audit-summary, policy-check, task-card, spec-board.
+description: Use the local CUCP (Computer Use Control Plane) CLI from any Codex / Claude / Kiro project to observe, ground, and operate the user's Windows desktop at Claude Computer Use grade. Single entry point is `scripts/cucp.ps1`. Trigger on cucp, CUP, computer use, computer-use, Windows control, desktop control, appshot, snapshot, live benchmark, desktop benchmark, screen control, GUI automation, PC/app control, "컴퓨터 유즈", "컴퓨터 사용", "컴퓨터 조작", "내 컴퓨터 조작", "내 컴퓨터를 조작", "내 PC 조작", "앱 조작", "윈도우 조작", "화면 조작", "데스크톱 자동화", "자동화 실행", "GUI 자동화", "라벨 클릭", "버튼 클릭해줘", or whenever the user asks Codex to inspect, click, type, drag, scroll, switch apps, follow a goal, or autonomously operate the local Windows desktop. v2.3.0 macros (full surface): version, daemon, mouse-verify, cdp-prosemirror-insert, cdp-deep-find, modal-detect, recovery-plan, recovery-run, precision-validate, benchmark, release-notes, ime-paste, safe-type-ime, recorder, audit-summary, policy-check.
 ---
 
 # CUCP Computer Use (Claude-grade)
@@ -65,10 +65,6 @@ powershell -NoProfile -ExecutionPolicy Bypass -File C:\Users\K\.codex\skills\cuc
 & <wrapper> macro smart-plan --label "Save" --match "Kiro" --precision-points  # planner can recommend micro-refined click-point route
 & <wrapper> macro smart-plan --label "Message" --type-text "hello" --allow-cdp  # read-only input planner
 & <wrapper> macro app-profile --match "Chrome" --label "Send" --label "Subject" --auto-probe  # read-only app profile and capability probes
-& <wrapper> macro task-card open                # XG5000/XP-Builder devices/requirements card
-& <wrapper> macro task-card show                # read current task-card JSON for planning
-& <wrapper> macro spec-board open               # XG5000 project spec/checklist board
-& <wrapper> macro spec-board ladder             # deterministic ladder draft from spec-board
 & <wrapper> macro workflow-plan --step "macro hit-test --x 1200 --y 720 --fast" --step "macro form-plan --field Message=hello"  # read-only multi-step workflow plan
 & <wrapper> macro workflow-run --step "macro hit-test --x 1200 --y 720 --fast" --step "macro windows"  # run read-only workflow without live control
 & <wrapper> macro workflow-run --observe-after-step --step "macro hit-test --x 1200 --y 720 --fast"  # execute read-only step, then capture a cheap window observation
@@ -157,7 +153,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File C:\Users\K\.codex\skills\cuc
 & <wrapper> macro perf --iters 1               # 12 targets, helper 포함 (느림, validate 용)
 & <wrapper> macro log-tail --lines 50 --max-bytes 65536 --errors-only   # bounded read + secret redact
 & <wrapper> macro diagnose-lag --sample-ms 3000   # Codex/Kiro/Chrome/node 프로세스 + 경고
-& <wrapper> macro cleanup --dry-run            # CUCP temp 정리 미리보기 (xg5000 폴더는 절대 안 건드림)
+& <wrapper> macro cleanup --dry-run            # CUCP temp 정리 미리보기
 & <wrapper> macro cleanup --execute --older-than-minutes 30 --keep-latest 50
 & <wrapper> macro trajectory show --last 20
 & <wrapper> macro session info
@@ -175,7 +171,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File C:\Users\K\.codex\skills\cuc
 
 ## Plans / Scenarios / Benchmarks
 
-샘플: `plans/notepad-hello-world.json`, `plans/xg5000-program-check.json`. 흐름: `plan validate` → `dry-run` → `readiness --strict` → `preflight` → `run --readiness --strict-readiness --preflight`. 모든 옵션은 [`references/command-reference.md`](references/command-reference.md).
+샘플: `plans/notepad-hello-world.json`. 흐름: `plan validate` → `dry-run` → `readiness --strict` → `preflight` → `run --readiness --strict-readiness --preflight`. 모든 옵션은 [`references/command-reference.md`](references/command-reference.md).
 
 ## Standardized Exit Codes
 

@@ -1,4 +1,4 @@
-﻿# Pester 3.x compatible regression tests for cucp.ps1 wrapper
+# Pester 3.x compatible regression tests for cucp.ps1 wrapper
 # 하드코딩 경로 없음 — $PSScriptRoot 기준 상대 경로로 자동 해석.
 # Run:
 #   Invoke-Pester C:\<설치경로>\cucp-computer-use\tests\cucp.Tests.ps1
@@ -16,12 +16,6 @@ try {
     [System.Environment]::SetEnvironmentVariable("PATH", $null, "Process")
   }
 } catch { }
-
-# xg5000 스킬은 선택적 의존성 — 없으면 해당 테스트 skip
-$xg5000Root = Join-Path (Split-Path -Parent $skillRoot) "xg5000-windows-mcp-reference"
-$evidence  = Join-Path $xg5000Root "scripts\xg5000-evidence.ps1"
-$preflight = Join-Path $xg5000Root "scripts\xg5000-preflight.ps1"
-$lint      = Join-Path $xg5000Root "scripts\xg5000-lint.ps1"
 
 function _RunExit { param([scriptblock]$Block)
   try { & $Block 2>&1 | Out-Null } catch { }
@@ -105,97 +99,6 @@ Describe "cucp wrapper - error escalation" {
     $code = _RunExit { & $wrapper -Quiet plan readiness --file $bad --strict }
     Remove-Item -LiteralPath $bad -Force -ErrorAction SilentlyContinue
     $code | Should Not Be 0
-  }
-}
-
-Describe "xg5000-evidence" {
-  It "Verify mode passes all 8 contract checks (exit 0)" {
-    if (-not (Test-Path -LiteralPath $evidence)) { Write-Host "SKIP: xg5000 not installed"; return }
-    (_RunExit { & $evidence -Verify -Brief }) | Should Be 0
-  }
-  It "returns partial+exit2 when no matching window" {
-    if (-not (Test-Path -LiteralPath $evidence)) { Write-Host "SKIP: xg5000 not installed"; return }
-    (_RunExit { & $evidence -WindowMatch "unlikely-pester-test-window" -Brief -Quiet }) | Should Be 2
-  }
-}
-
-Describe "xg5000-preflight" {
-  It "blocks (exit 3) when XG5000 is not running" {
-    if (-not (Test-Path -LiteralPath $preflight)) { Write-Host "SKIP: xg5000 not installed"; return }
-    (_RunExit { & $preflight -WindowMatch "unlikely-xg5000-pester-test" -Brief -Quiet }) | Should Be 3
-  }
-  It "Fast mode blocks (exit 3) on no-match within 6s budget" {
-    if (-not (Test-Path -LiteralPath $preflight)) { Write-Host "SKIP: xg5000 not installed"; return }
-    $sw = [System.Diagnostics.Stopwatch]::StartNew()
-    $code = _RunExit { & $preflight -Fast -WindowMatch "unlikely-fast-no-match" -Brief -Quiet }
-    $sw.Stop()
-    $code | Should Be 3
-    # Soft budget: hard target is 5s but we allow 6s in Pester host overhead.
-    ($sw.Elapsed.TotalSeconds -lt 6.0) | Should Be $true
-  }
-  It "honors -EvidenceDir by skipping live evidence collection" {
-    if (-not (Test-Path -LiteralPath $preflight)) { Write-Host "SKIP: xg5000 not installed"; return }
-    # 가짜 evidence 폴더 (no-window) 를 만들어 재사용 경로가 동작함을 검증
-    $evDir = Join-Path $env:TEMP ("pester-pf-reuse-" + (Get-Date).ToString("HHmmssfff"))
-    New-Item -ItemType Directory -Path $evDir -Force | Out-Null
-    @{
-      status = "partial"; helper_ok = $true; windows_count = 0
-      focused_window = ""; reason = "no-matching-window"
-      collected_at = (Get-Date).ToString("o")
-    } | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $evDir "summary.json") -Encoding UTF8
-
-    $outDir = Join-Path $env:TEMP ("pester-pf-out-" + (Get-Date).ToString("HHmmssfff"))
-    $code = _RunExit { & $preflight -Fast -WindowMatch "unlikely-reuse-target" -EvidenceDir $evDir -OutDir $outDir -Brief -Quiet }
-    $code | Should Be 3
-    $sumPath = Join-Path $outDir "summary.json"
-    (Test-Path -LiteralPath $sumPath) | Should Be $true
-    $obj = Get-Content -LiteralPath $sumPath -Raw -Encoding UTF8 | ConvertFrom-Json
-    $obj.reused_evidence | Should Be $true
-    Remove-Item -LiteralPath $evDir, $outDir -Recurse -Force -ErrorAction SilentlyContinue
-  }
-}
-
-Describe "xg5000-lint" {
-  # xg5000 스킬이 없으면 이 Describe 전체 skip
-  $cleanFile = Join-Path $xg5000Root "references\sample-vars-clean.json"
-  $badFile   = Join-Path $xg5000Root "references\sample-vars-bad.json"
-  It "clean sample passes (exit 0 or 2)" {
-    if (-not (Test-Path -LiteralPath $lint)) { Write-Host "SKIP: xg5000 not installed"; return }
-    $code = _RunExit { & $lint -VariablesFile $cleanFile -Brief -Quiet }
-    (@(0,2) -contains $code) | Should Be $true
-  }
-  It "bad sample produces engineering errors (exit 3)" {
-    if (-not (Test-Path -LiteralPath $lint)) { Write-Host "SKIP: xg5000 not installed"; return }
-    (_RunExit { & $lint -VariablesFile $badFile -Brief -Quiet }) | Should Be 3
-  }
-  It "two consecutive runs use distinct OutDir folders" {
-    if (-not (Test-Path -LiteralPath $lint)) { Write-Host "SKIP: xg5000 not installed"; return }
-    # 자동 OutDir(타임스탬프 + PID)이 같은 초/밀리초 안에서도 충돌하지 않는지 확인.
-    & $lint -VariablesFile $cleanFile -Brief -Quiet | Out-Null
-    $first = (Get-ChildItem -LiteralPath $env:TEMP -Filter "xg5000-lint-*" -Directory -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending | Select-Object -First 1).FullName
-    & $lint -VariablesFile $cleanFile -Brief -Quiet | Out-Null
-    $second = (Get-ChildItem -LiteralPath $env:TEMP -Filter "xg5000-lint-*" -Directory -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending | Select-Object -First 1).FullName
-    ($first -ne $second) | Should Be $true
-  }
-}
-
-Describe "xg5000-handoff" {
-  $handoff   = Join-Path $xg5000Root "scripts\xg5000-handoff.ps1"
-  $cleanFile = Join-Path $xg5000Root "references\sample-vars-clean.json"
-  It "honors explicit -LintReport path in handoff.json" {
-    if (-not (Test-Path -LiteralPath $handoff)) { Write-Host "SKIP: xg5000 not installed"; return }
-    # 1) lint를 한 번 실행해서 lint.json 생성
-    & $lint -VariablesFile $cleanFile -Brief -Quiet | Out-Null
-    $lintDir = (Get-ChildItem -LiteralPath $env:TEMP -Filter "xg5000-lint-*" -Directory -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending | Select-Object -First 1).FullName
-    $lintJson = Join-Path $lintDir "lint.json"
-    (Test-Path -LiteralPath $lintJson) | Should Be $true
-    # 2) handoff에 명시적으로 -LintReport 전달
-    $outDir = Join-Path $env:TEMP ("pester-handoff-" + ((Get-Date).ToString("HHmmssfff")))
-    & $handoff -LintReport $lintJson -OutDir $outDir -WindowMatch "unlikely-handoff-test-window" -Brief -Quiet | Out-Null
-    $handoffJson = Join-Path $outDir "handoff.json"
-    (Test-Path -LiteralPath $handoffJson) | Should Be $true
-    $obj = Get-Content -LiteralPath $handoffJson -Raw -Encoding UTF8 | ConvertFrom-Json
-    $obj.lint_report | Should Be $lintJson
   }
 }
 

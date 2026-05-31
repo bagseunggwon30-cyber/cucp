@@ -125,6 +125,6 @@ CDP smart action이 실패하면 Stage 1~6으로 정상 cascade 됩니다.
 
 ## 한계
 
-- Electron 아닌 앱 (메모장, XG5000 같은 native Win32) 은 CDP 적용 불가 → Stage 1~6 fallback
+- Electron 아닌 native Win32 앱은 CDP 적용 불가 → Stage 1~6 fallback
 - 일부 Electron 앱은 보안 정책으로 CDP 비활성화 (예: Microsoft Teams 의 일부 빌드)
 - CDP 포트 활성 후 Electron 앱 재시작 필요 (런타임 토글 안 됨)
