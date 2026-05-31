@@ -7,11 +7,9 @@
 #   powershell -NoProfile -ExecutionPolicy Bypass -File .\references\live-cassette-runner.ps1 -Env notepad
 #   powershell -NoProfile -ExecutionPolicy Bypass -File .\references\live-cassette-runner.ps1 -Env kiro
 #   powershell -NoProfile -ExecutionPolicy Bypass -File .\references\live-cassette-runner.ps1 -Env chrome
-#   powershell -NoProfile -ExecutionPolicy Bypass -File .\references\live-cassette-runner.ps1 -Env xg5000
-#   powershell -NoProfile -ExecutionPolicy Bypass -File .\references\live-cassette-runner.ps1 -Env xg5000 -DryRun
 [CmdletBinding(PositionalBinding = $false)]
 param(
-    [ValidateSet('notepad', 'kiro', 'chrome', 'xg5000', 'all')]
+    [ValidateSet('notepad', 'kiro', 'chrome', 'all')]
     [string]$Env = 'all',
     [switch]$All,
     [switch]$DryRun
@@ -54,8 +52,7 @@ function _Save-Cassette {
     if (-not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
     $stamp = (Get-Date).ToString("yyyyMMdd-HHmmss")
     $path = Join-Path $dir ($Name + '-' + $stamp + '.json')
-    # BOM 없는 UTF-8 로 저장. PowerShell 5.x 의 `Set-Content -Encoding UTF8` 는 BOM 을
-    # 붙여서 xg5000-evidence 의 no_utf8_bom 계약 검사를 깨뜨린다 (회귀 방지).
+    # Write UTF-8 without BOM so cassette parsers can consume the files.
     $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
     [System.IO.File]::WriteAllText($path, $Content, $utf8NoBom)
     Write-Host ('saved cassette: ' + $path)
@@ -132,27 +129,14 @@ function _Cassette-Chrome {
     _Save-Cassette -EnvName 'chrome' -Name 'cdp-smart-click' -Content $r2 | Out-Null
 }
 
-function _Cassette-XG5000 {
-    Write-Host ''
-    Write-Host '=== XG5000 cassette ==='
-    Write-Host 'Prep: Best with XG5000 or XP-Builder running. task-card itself works without it.'
-    if (-not (_Ask-YesNo 'Continue with XG5000?')) { return }
-    $r1 = _Run-Macro -WrapperArgs @('macro', 'task-card', 'show', '--json-only')
-    _Save-Cassette -EnvName 'xg5000' -Name 'task-card-show' -Content $r1 | Out-Null
-    $r2 = _Run-Macro -WrapperArgs @('macro', 'app-profile', '--match', 'XG5000', '--json-only')
-    _Save-Cassette -EnvName 'xg5000' -Name 'app-profile' -Content $r2 | Out-Null
-}
-
 switch ($Env) {
     'notepad' { _Cassette-Notepad }
     'kiro'    { _Cassette-Kiro }
     'chrome'  { _Cassette-Chrome }
-    'xg5000'  { _Cassette-XG5000 }
     'all' {
         _Cassette-Notepad
         _Cassette-Kiro
         _Cassette-Chrome
-        _Cassette-XG5000
     }
 }
 

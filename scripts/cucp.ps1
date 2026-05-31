@@ -213,18 +213,6 @@ $Script:NativeHelperPath = Join-Path $PSScriptRoot "cucp-native-helper.ps1"
 if (-not (Test-Path -LiteralPath $Script:NativeHelperPath)) {
   $Script:NativeHelperPath = ""
 }
-$Script:TaskCardScriptPath = Join-Path $PSScriptRoot "cucp-task-card.ps1"
-$Script:TaskCardDir = Join-Path $Script:AuditDir "task-card"
-$Script:TaskCardPath = Join-Path $Script:TaskCardDir "current-task-card.json"
-if (-not (Test-Path -LiteralPath $Script:TaskCardScriptPath)) {
-  $Script:TaskCardScriptPath = ""
-}
-$Script:SpecBoardScriptPath = Join-Path $PSScriptRoot "cucp-spec-board.ps1"
-$Script:SpecBoardDir = Join-Path $Script:AuditDir "spec-board"
-$Script:SpecBoardPath = Join-Path $Script:SpecBoardDir "current-spec-board.json"
-if (-not (Test-Path -LiteralPath $Script:SpecBoardScriptPath)) {
-  $Script:SpecBoardScriptPath = ""
-}
 
 # cli.mjs를 찾지 못하면 경고만 남기고 계속 진행 (read-only 매크로는 동작 가능)
 if (-not $Script:CliPath) {
@@ -234,9 +222,6 @@ if (-not $Script:CliPath) {
 
 if (-not (Test-Path -LiteralPath $Script:CacheDir)) {
   try { New-Item -ItemType Directory -Path $Script:CacheDir -Force | Out-Null } catch { }
-}
-if (-not (Test-Path -LiteralPath $Script:TaskCardDir)) {
-  try { New-Item -ItemType Directory -Path $Script:TaskCardDir -Force | Out-Null } catch { }
 }
 
 if (-not $Script:CliPath) {
@@ -510,7 +495,7 @@ function Stop-HelperServer {
 #   - 사용자가 shell:startup 에서 직접 눈으로 확인 / 삭제 가능 (투명성)
 #   - HKCU 만 건드리지 않으므로 다른 user 영향 0 (multi-user 격리 유지)
 #   - shim 은 idle-timeout 을 길게 (기본 8h) 줘서 부팅 후 종일 warm 유지
-# 안전: PLC 제어와 무관한 read-only IPC server 만 띄움. live actuation 게이트
+# 안전: read-only IPC server 만 띄움. live actuation 게이트
 #       (-AllowLiveControl) 는 server 경로에서도 그대로 적용된다.
 # ============================================================================
 
@@ -2520,8 +2505,6 @@ function Invoke-Macro {
     "screenshot"    { return Invoke-MacroScreenshot -Rest $rest }
     # ── Native helper 직통 (외부 helper 의존 없음) ─────────────────────────
     "native-health"     { return Invoke-MacroNativeHealth -Rest $rest }
-    "task-card"         { return Invoke-MacroTaskCard -Rest $rest }
-    "spec-board"        { return Invoke-MacroSpecBoard -Rest $rest }
     "native-windows"    { return Invoke-MacroNativeWindows -Rest $rest }
     "native-screenshot" { return Invoke-MacroNativeScreenshot -Rest $rest }
     "click-point"       { return Invoke-MacroClickPoint -Rest $rest }
@@ -2603,7 +2586,7 @@ function Invoke-Macro {
     "click-and-verify" { return Invoke-MacroClickAndVerify -Rest $rest }
     "auto-do"       { return Invoke-MacroAutoDo -Rest $rest }
     default {
-      Write-Notice -Level "ERROR" -Message "알 수 없는 매크로: $sub. 사용 가능: version, safety-classify, daemon, mouse-verify, click-label, double-click-label, right-click-label, click-id, click-point, fill-label, focus-window, focus-verify, wait-window, wait-label, find-label, list-affordances, shortcut, goal, session, self-test, trajectory, ensure-helper, vision-find, vision-click, vision-click-precise, icon-find, icon-click, screenshot, windows, log-tail, diagnose-lag, cleanup, clipboard, process, registry, notify, multi-select, multi-edit, scrape, dom-snapshot, metrics, perf, health-detail, health-quick, app-launch, app-close, with-app, click-and-verify, auto-do, native-health, task-card, spec-board, native-windows, native-screenshot, type-native, shortcut-native, uia-click-label, uia-invoke, uia-set-value, uia-toggle, workflow-plan, workflow-run, smart-plan, app-profile, task-preset, task-plan, task-run, form-plan, form-run, smart-click, watch, ocr-screen, ocr-image, ocr-find-text, ocr-click, ocr-uia-fuse, screenshot-diff, click-and-verify-screen, ocr-uia-invoke, history, coord-profile, coord-map, coord-anchor, hit-test, hit-test-batch, hit-scan, point-plan, target-validate, safe-type, cdp-detect, cdp-eval, cdp-type, cdp-click, cdp-smart-find, cdp-smart-type-find, cdp-smart-click, cdp-smart-type, cdp-deep-find, cdp-prosemirror-insert, ime-paste, safe-type-ime, modal-detect, recovery-plan, recovery-run, precision-validate, benchmark, release-notes"
+      Write-Notice -Level "ERROR" -Message "알 수 없는 매크로: $sub. 사용 가능: version, safety-classify, daemon, mouse-verify, click-label, double-click-label, right-click-label, click-id, click-point, fill-label, focus-window, focus-verify, wait-window, wait-label, find-label, list-affordances, shortcut, goal, session, self-test, trajectory, ensure-helper, vision-find, vision-click, vision-click-precise, icon-find, icon-click, screenshot, windows, log-tail, diagnose-lag, cleanup, clipboard, process, registry, notify, multi-select, multi-edit, scrape, dom-snapshot, metrics, perf, health-detail, health-quick, app-launch, app-close, with-app, click-and-verify, auto-do, native-health, native-windows, native-screenshot, type-native, shortcut-native, uia-click-label, uia-invoke, uia-set-value, uia-toggle, workflow-plan, workflow-run, smart-plan, app-profile, task-preset, task-plan, task-run, form-plan, form-run, smart-click, watch, ocr-screen, ocr-image, ocr-find-text, ocr-click, ocr-uia-fuse, screenshot-diff, click-and-verify-screen, ocr-uia-invoke, history, coord-profile, coord-map, coord-anchor, hit-test, hit-test-batch, hit-scan, point-plan, target-validate, safe-type, cdp-detect, cdp-eval, cdp-type, cdp-click, cdp-smart-find, cdp-smart-type-find, cdp-smart-click, cdp-smart-type, cdp-deep-find, cdp-prosemirror-insert, ime-paste, safe-type-ime, modal-detect, recovery-plan, recovery-run, precision-validate, benchmark, release-notes"
       throw "Unknown macro: $sub"
     }
   }
@@ -2657,278 +2640,6 @@ function _Macro-NotImplemented {
     [Console]::Out.WriteLine(($payload | ConvertTo-Json -Depth 6))
   }
   return 1
-}
-
-function Invoke-TaskCardScript {
-  param(
-    [Parameter(Mandatory)] [string]$Mode,
-    [string[]]$ExtraArgs = @()
-  )
-  if (-not $Script:TaskCardScriptPath -or -not (Test-Path -LiteralPath $Script:TaskCardScriptPath)) {
-    throw "CUCP task-card script is missing: $($Script:TaskCardScriptPath)"
-  }
-  $args = @(
-    "-NoProfile",
-    "-ExecutionPolicy", "Bypass",
-    "-File", $Script:TaskCardScriptPath,
-    "-Mode", $Mode,
-    "-Path", $Script:TaskCardPath
-  )
-  foreach ($arg in @($ExtraArgs)) {
-    if ($null -ne $arg) { $args += "$arg" }
-  }
-  return @(& powershell.exe @args)
-}
-
-function Get-TaskCardContext {
-  param([switch]$Ensure)
-  if (-not $Script:TaskCardScriptPath -or -not (Test-Path -LiteralPath $Script:TaskCardScriptPath)) {
-    return $null
-  }
-  try {
-    if ($Ensure -or -not (Test-Path -LiteralPath $Script:TaskCardPath)) {
-      Invoke-TaskCardScript -Mode "ensure" | Out-Null
-    }
-    if (-not (Test-Path -LiteralPath $Script:TaskCardPath)) { return $null }
-    $raw = Get-Content -LiteralPath $Script:TaskCardPath -Raw -Encoding UTF8
-    if ([string]::IsNullOrWhiteSpace($raw)) { return $null }
-    return ($raw | ConvertFrom-Json)
-  } catch {
-    return [pscustomobject]@{
-      schema = "cucp.task-card/v1"
-      status = "invalid"
-      path = $Script:TaskCardPath
-      error = $_.Exception.Message
-    }
-  }
-}
-
-function Get-TaskCardSaveArgs {
-  param([string[]]$Rest)
-  $extra = New-Object System.Collections.ArrayList
-  $pairs = @(
-    @{ Opt = "--tool"; Param = "-Tool" },
-    @{ Opt = "--project"; Param = "-ProjectName" },
-    @{ Opt = "--project-name"; Param = "-ProjectName" },
-    @{ Opt = "--plc"; Param = "-PlcModel" },
-    @{ Opt = "--plc-model"; Param = "-PlcModel" },
-    @{ Opt = "--communication"; Param = "-Communication" },
-    @{ Opt = "--comm"; Param = "-Communication" },
-    @{ Opt = "--devices"; Param = "-Devices" },
-    @{ Opt = "--address-ranges"; Param = "-AddressRanges" },
-    @{ Opt = "--ranges"; Param = "-AddressRanges" },
-    @{ Opt = "--requirements"; Param = "-Requirements" },
-    @{ Opt = "--constraints"; Param = "-Constraints" },
-    @{ Opt = "--notes"; Param = "-Notes" }
-  )
-  foreach ($pair in $pairs) {
-    $value = _Read-OptValue -Rest $Rest -Name $pair.Opt
-    if ($null -ne $value) {
-      [void]$extra.Add($pair.Param)
-      [void]$extra.Add("$value")
-    }
-  }
-  return @($extra)
-}
-
-function Invoke-MacroTaskCard {
-  param([string[]]$Rest)
-  $action = if ($Rest -and $Rest.Count -gt 0) { "$($Rest[0])".ToLowerInvariant() } else { "open" }
-  $jsonOnly = _Read-Switch -Rest $Rest -Name "--json-only"
-
-  switch ($action) {
-    "open" {
-      $saveArgs = Get-TaskCardSaveArgs -Rest $Rest
-      if ($saveArgs.Count -gt 0) { Invoke-TaskCardScript -Mode "save" -ExtraArgs $saveArgs | Out-Null }
-      else { Invoke-TaskCardScript -Mode "ensure" | Out-Null }
-
-      $args = @(
-        "-NoProfile",
-        "-ExecutionPolicy", "Bypass",
-        "-File", $Script:TaskCardScriptPath,
-        "-Mode", "open",
-        "-Path", $Script:TaskCardPath
-      )
-      Start-Process -FilePath "powershell.exe" -ArgumentList (ConvertTo-ProcessArgumentString -ArgList $args) -WindowStyle Normal | Out-Null
-      $payload = [pscustomobject]@{
-        schema = "cucp.task-card/macro/v1"
-        status = "ok"
-        action = "open"
-        path = $Script:TaskCardPath
-        next_action = "Fill or edit the visible CUCP task card, then run macro task-card show or macro app-profile --match XG5000."
-      }
-      if ($Brief -and -not $jsonOnly) { [Console]::Out.WriteLine("ok task-card action=open path=$($Script:TaskCardPath)") }
-      else { [Console]::Out.WriteLine(($payload | ConvertTo-Json -Depth 8)) }
-      return 0
-    }
-    "show" {
-      $raw = Invoke-TaskCardScript -Mode "show"
-      [Console]::Out.WriteLine(($raw -join "`n"))
-      return 0
-    }
-    "ensure" {
-      $raw = Invoke-TaskCardScript -Mode "ensure"
-      if ($Brief -and -not $jsonOnly) { [Console]::Out.WriteLine("ok task-card action=ensure path=$($Script:TaskCardPath)") }
-      else { [Console]::Out.WriteLine(($raw -join "`n")) }
-      return 0
-    }
-    "save" {
-      $saveArgs = Get-TaskCardSaveArgs -Rest $Rest
-      $raw = Invoke-TaskCardScript -Mode "save" -ExtraArgs $saveArgs
-      [Console]::Out.WriteLine(($raw -join "`n"))
-      return 0
-    }
-    "path" {
-      [Console]::Out.WriteLine($Script:TaskCardPath)
-      return 0
-    }
-    "clear" {
-      if (Test-Path -LiteralPath $Script:TaskCardPath) {
-        Remove-Item -LiteralPath $Script:TaskCardPath -Force
-      }
-      $payload = [pscustomobject]@{
-        schema = "cucp.task-card/macro/v1"
-        status = "ok"
-        action = "clear"
-        path = $Script:TaskCardPath
-      }
-      if ($Brief -and -not $jsonOnly) { [Console]::Out.WriteLine("ok task-card action=clear") }
-      else { [Console]::Out.WriteLine(($payload | ConvertTo-Json -Depth 6)) }
-      return 0
-    }
-    default {
-      [Console]::Out.WriteLine("Usage: macro task-card open|show|ensure|save|path|clear [--tool XG5000] [--project <name>] [--plc <model>] [--devices <list>] [--requirements <text>]")
-      return 2
-    }
-  }
-}
-
-function Invoke-SpecBoardScript {
-  param(
-    [Parameter(Mandatory)] [string]$Mode,
-    [string[]]$ExtraArgs = @()
-  )
-  if (-not $Script:SpecBoardScriptPath -or -not (Test-Path -LiteralPath $Script:SpecBoardScriptPath)) {
-    throw "CUCP spec-board script is missing: $($Script:SpecBoardScriptPath)"
-  }
-  $args = @(
-    "-NoProfile",
-    "-ExecutionPolicy", "Bypass",
-    "-File", $Script:SpecBoardScriptPath,
-    "-Mode", $Mode,
-    "-Path", $Script:SpecBoardPath
-  )
-  foreach ($arg in @($ExtraArgs)) {
-    if ($null -ne $arg) { $args += "$arg" }
-  }
-  return @(& powershell.exe @args)
-}
-
-function Get-SpecBoardContext {
-  param([switch]$Ensure)
-  if (-not $Script:SpecBoardScriptPath -or -not (Test-Path -LiteralPath $Script:SpecBoardScriptPath)) {
-    return $null
-  }
-  try {
-    if ($Ensure -or -not (Test-Path -LiteralPath $Script:SpecBoardPath)) {
-      Invoke-SpecBoardScript -Mode "ensure" | Out-Null
-    }
-    if (-not (Test-Path -LiteralPath $Script:SpecBoardPath)) { return $null }
-    $raw = Get-Content -LiteralPath $Script:SpecBoardPath -Raw -Encoding UTF8
-    if ([string]::IsNullOrWhiteSpace($raw)) { return $null }
-    return ($raw | ConvertFrom-Json)
-  } catch {
-    return [pscustomobject]@{
-      schema = "cucp.spec-board/v1"
-      status = "invalid"
-      path = $Script:SpecBoardPath
-      error = $_.Exception.Message
-    }
-  }
-}
-
-function Invoke-MacroSpecBoard {
-  param([string[]]$Rest)
-  $action = if ($Rest -and $Rest.Count -gt 0) { "$($Rest[0])".ToLowerInvariant() } else { "open" }
-  $jsonOnly = _Read-Switch -Rest $Rest -Name "--json-only"
-
-  switch ($action) {
-    "open" {
-      Invoke-SpecBoardScript -Mode "ensure" | Out-Null
-      $args = @(
-        "-NoProfile",
-        "-ExecutionPolicy", "Bypass",
-        "-File", $Script:SpecBoardScriptPath,
-        "-Mode", "open",
-        "-Path", $Script:SpecBoardPath
-      )
-      Start-Process -FilePath "powershell.exe" -ArgumentList (ConvertTo-ProcessArgumentString -ArgList $args) -WindowStyle Normal | Out-Null
-      $payload = [pscustomobject]@{
-        schema = "cucp.spec-board/macro/v1"
-        status = "ok"
-        action = "open"
-        path = $Script:SpecBoardPath
-        next_action = "Keep this board visible while working in XG5000; use spec-board check --id XG-001 as tasks are completed."
-      }
-      if ($Brief -and -not $jsonOnly) { [Console]::Out.WriteLine("ok spec-board action=open path=$($Script:SpecBoardPath)") }
-      else { [Console]::Out.WriteLine(($payload | ConvertTo-Json -Depth 8)) }
-      return 0
-    }
-    "show" {
-      $raw = Invoke-SpecBoardScript -Mode "show"
-      [Console]::Out.WriteLine(($raw -join "`n"))
-      return 0
-    }
-    "ensure" {
-      $raw = Invoke-SpecBoardScript -Mode "ensure"
-      if ($Brief -and -not $jsonOnly) { [Console]::Out.WriteLine("ok spec-board action=ensure path=$($Script:SpecBoardPath)") }
-      else { [Console]::Out.WriteLine(($raw -join "`n")) }
-      return 0
-    }
-    "path" {
-      [Console]::Out.WriteLine($Script:SpecBoardPath)
-      return 0
-    }
-    "check" {
-      $id = _Read-OptValue -Rest $Rest -Name "--id"
-      if (-not $id -and $Rest.Count -gt 1) { $id = "$($Rest[1])" }
-      $raw = Invoke-SpecBoardScript -Mode "check" -ExtraArgs @("-TaskId", "$id")
-      [Console]::Out.WriteLine(($raw -join "`n"))
-      return 0
-    }
-    "uncheck" {
-      $id = _Read-OptValue -Rest $Rest -Name "--id"
-      if (-not $id -and $Rest.Count -gt 1) { $id = "$($Rest[1])" }
-      $raw = Invoke-SpecBoardScript -Mode "uncheck" -ExtraArgs @("-TaskId", "$id")
-      [Console]::Out.WriteLine(($raw -join "`n"))
-      return 0
-    }
-    "ladder" {
-      $raw = Invoke-SpecBoardScript -Mode "ladder"
-      [Console]::Out.WriteLine(($raw -join "`n"))
-      return 0
-    }
-    "markdown" {
-      $raw = Invoke-SpecBoardScript -Mode "markdown"
-      [Console]::Out.WriteLine(($raw -join "`n"))
-      return 0
-    }
-    "sequence" {
-      # 자산 3↔1 연동: 정수형 스텝 머신 시퀀스를 아키텍트 프롬프트가 소비할 표/contract 로 출력.
-      $raw = Invoke-SpecBoardScript -Mode "sequence"
-      [Console]::Out.WriteLine(($raw -join "`n"))
-      return 0
-    }
-    "clear" {
-      $raw = Invoke-SpecBoardScript -Mode "clear"
-      [Console]::Out.WriteLine(($raw -join "`n"))
-      return 0
-    }
-    default {
-      [Console]::Out.WriteLine("Usage: macro spec-board open|show|ensure|path|check|uncheck|ladder|markdown|sequence|clear [--id XG-001]")
-      return 2
-    }
-  }
 }
 
 function _Safety-Truncate {
@@ -4078,7 +3789,7 @@ function Invoke-MacroListAffordances {
   $foreground = $null
   if ($shot.FocusedWindow) { $foreground = [pscustomobject]@{ title = $shot.FocusedWindow } }
 
-  # Backwards-compatible top-level shape (legacy callers like xg5000-evidence).
+  # Backwards-compatible top-level shape for legacy parsers.
   $payload = [pscustomobject]@{
     status = "ok"
     schema = "cucp.list-affordances/v2"
@@ -6315,7 +6026,7 @@ function Invoke-MacroCleanup {
   #   *.png (under screenshots/ only), trajectory.ndjson.bak (only with --include-trajectory)
   #
   # Default policy: --older-than-minutes 30, --keep-latest 50.
-  # Refuses to operate outside the verified root. xg5000-* temp folders are
+  # Refuses to operate outside the verified root. CUCP temp folders are
   # NEVER touched (out of scope for this CUCP-only macro).
   param([string[]]$Rest)
   $execute = _Read-Switch -Rest $Rest -Name "--execute"
@@ -10034,7 +9745,7 @@ function _Build-WorkflowPlan {
   $readOnlyMacros = @(
     "windows","native-windows","wait-window","wait-label","find-label","list-affordances",
     "health-quick","health-detail","native-health","metrics","perf","log-tail","diagnose-lag",
-    "session","trajectory","history","screenshot","native-screenshot","task-card","spec-board",
+    "session","trajectory","history","screenshot","native-screenshot",
     "safety-classify","coord-profile","coord-map","coord-anchor","hit-test","hit-test-batch","hit-scan","point-plan","target-validate","smart-plan","app-profile","task-preset","task-plan","form-plan",
     "cdp-detect","cdp-eval","cdp-smart-find","cdp-smart-type-find",
     "ocr-screen","ocr-image","ocr-find-text","ocr-uia-fuse","screenshot-diff",
@@ -10669,7 +10380,6 @@ function _AppProfile-StrategyScore {
     [string[]]$Labels,
     $PersistedStrategy,
     [bool]$BrowserLike,
-    [bool]$IndustrialLike,
     [bool]$OfficeLike,
     [bool]$NoProbe
   )
@@ -10720,11 +10430,7 @@ function _AppProfile-StrategyScore {
     _ScoreAdd -Route "uia_pattern" -Points 10 -Reason "uia_not_probed"
   }
 
-  if ($IndustrialLike) {
-    _ScoreAdd -Route "precision_point" -Points 20 -Reason "industrial_owner_drawn_surface"
-    _ScoreAdd -Route "ocr" -Points 18 -Reason "industrial_canvas_or_dialog_text"
-    _ScoreAdd -Route "vision_precise" -Points 8 -Reason "industrial_visual_fallback"
-  } elseif ($OfficeLike) {
+  if ($OfficeLike) {
     _ScoreAdd -Route "uia_value_or_pattern" -Points 24 -Reason "document_or_mail_app"
     _ScoreAdd -Route "safe_type_guarded" -Points 16 -Reason "document_or_mail_app"
   } else {
@@ -10819,8 +10525,6 @@ function Invoke-MacroAppProfile {
 
   if (-not $target) {
     $sw.Stop()
-    $taskCard = Get-TaskCardContext
-    $specBoard = Get-SpecBoardContext
     $payload = [pscustomobject]@{
       schema = "cucp.app-profile/v1"
       status = "partial"
@@ -10857,8 +10561,6 @@ function Invoke-MacroAppProfile {
       }
       recommended_task_options = @()
       probe_commands = @()
-      task_card = $taskCard
-      spec_board = $specBoard
       windows_sample = @($sample)
       elapsed_ms = [int]$sw.Elapsed.TotalMilliseconds
       next_action = if ($match) { "Run macro windows --json-only to inspect available windows, then retry app-profile with a narrower --match." } else { "Open or focus the target app, then run macro app-profile again." }
@@ -10968,9 +10670,6 @@ function Invoke-MacroAppProfile {
   _AppProfileAddOptions -Items @("--match",$targetMatch,"--precision-points","--settle-ms","150","--verify-after-step","--retry-failed-step","1")
 
   $browserLike = ($processLower -match '^(chrome|msedge|brave|firefox|kiro|cursor|code|windsurf|electron)$') -or ($classLower -like '*chrome_widgetwin*')
-  $industrialLike = ($identity -match 'xg5000|xp-builder|xg-pm|cimon|scada|xgt|plc|modbus')
-  $taskCard = Get-TaskCardContext -Ensure:([bool]$industrialLike)
-  $specBoard = Get-SpecBoardContext -Ensure:([bool]$industrialLike)
   $officeLike = ($identity -match 'winword|excel|powerpnt|outlook|onenote|hwp|wordpad|notepad')
   $runCdpProbe = (-not $noProbe) -and ($probeCdpRequested -or $browserLike)
   $runUiaProbe = (-not $noProbe) -and $probeUiaRequested
@@ -10995,22 +10694,6 @@ function Invoke-MacroAppProfile {
       [void]$notes.Add("CDP probe did not confirm an available DevTools port, so the recommended route starts with UIA and precision points.")
     }
     [void]$notes.Add("For Chrome/Electron, enable remote debugging when DOM-grade control is required.")
-  } elseif ($industrialLike) {
-    $appType = "industrial_win32"
-    $routeOrder = @("uia_pattern","win32_hit_test","precision_point","ocr","vision_precise")
-    _AppProfileAddOptions -Items @("--include-ocr")
-    [void]$notes.Add("PLC/SCADA tools often expose mixed Win32/UIA surfaces; prefer UIA pattern actions, then guarded hit-test and precision-point routes.")
-    [void]$notes.Add("Use OCR as a fallback for canvas-like dialogs or owner-drawn controls.")
-    if ($taskCard) {
-      [void]$notes.Add("CUCP task-card context is loaded; use its devices, requirements, and safety flags before planning live actions.")
-    } else {
-      [void]$notes.Add("Run macro task-card open to capture devices, requirements, and safety constraints for this XG5000/XP-Builder session.")
-    }
-    if ($specBoard) {
-      [void]$notes.Add("CUCP spec-board context is loaded; follow its environment, network, device map, kanban tasks, and warnings.")
-    } else {
-      [void]$notes.Add("Run macro spec-board open to keep the XG5000 project spec and checklist visible during work.")
-    }
   } elseif ($officeLike) {
     $appType = "document_or_mail_app"
     $routeOrder = @("uia_value_or_pattern","safe_type_guarded","shortcut","precision_point","ocr")
@@ -11041,7 +10724,6 @@ function Invoke-MacroAppProfile {
     -Labels $labels `
     -PersistedStrategy $lastGoodStrategy `
     -BrowserLike $browserLike `
-    -IndustrialLike $industrialLike `
     -OfficeLike $officeLike `
     -NoProbe $noProbe
   $routeOrder = @($strategyScore.route_order)
@@ -11072,7 +10754,6 @@ function Invoke-MacroAppProfile {
       $cmd += "--allow-cdp"
       if ($cdpPort -ne 9222) { $cmd += @("--cdp-port","$cdpPort") }
     }
-    if ($industrialLike) { $cmd += "--include-ocr" }
     $cmd += "--json-only"
     [void]$probeCommands.Add([pscustomobject]@{
       label = "$label"
@@ -11131,8 +10812,6 @@ function Invoke-MacroAppProfile {
     suggested_task_plan_prefix_line = _TaskPlan-StepString -Command $taskPrefix
     probe_commands = @($probeCommands)
     affordance_probe = $affordanceCommand
-    task_card = $taskCard
-    spec_board = $specBoard
     windows_sample = @($sample)
     notes = @($notes)
     elapsed_ms = [int]$sw.Elapsed.TotalMilliseconds
@@ -13567,10 +13246,6 @@ function Invoke-MacroSession {
         log_path = $Script:WrapperLog
         log_size_bytes = $logSize
         cli_path = $Script:CliPath
-        task_card_path = $Script:TaskCardPath
-        task_card_exists = [bool](Test-Path -LiteralPath $Script:TaskCardPath)
-        spec_board_path = $Script:SpecBoardPath
-        spec_board_exists = [bool](Test-Path -LiteralPath $Script:SpecBoardPath)
         cache_seconds = $CacheSeconds
         helper_server = $hsStatus
       }
@@ -13680,8 +13355,6 @@ if (-not $CucpArgs -or $CucpArgs.Count -eq 0) {
   Write-Host "  macro self-test          [--deep] [--strict]"
   Write-Host "  macro trajectory         show [--last <n>] | tail | clear"
   Write-Host "  macro ensure-helper      [--wait-ms <n>]"
-  Write-Host "  macro task-card          open|show|ensure|save|path|clear   (XG5000/XP-Builder context card)"
-  Write-Host "  macro spec-board         open|show|ensure|path|check|uncheck|ladder|markdown|clear   (XG5000 project spec board)"
   Write-Host "  macro vision-find        --describe <text> [--screenshot <path>] [--model <name>] [--timeout-ms <n>]"
   Write-Host "  macro vision-click       --describe <text> [--window <title>] [--verify-label <text>] [--verify-timeout-ms <n>] [--model <name>]"
   Write-Host "  macro metrics            (operational counters + click/cache rates)"
@@ -14839,7 +14512,7 @@ function Invoke-MacroDaemonServe {
 # 좌표 클릭의 정확도 cassette. -AllowLiveControl 필수. 실제 click 후 도착 좌표
 # (post_click.actual_x/y) 와 요청 좌표 비교 → drift 측정.
 # 정확도 = drift_max ≤ 3px AND target window 일치율 100%.
-# 본체에서 1환경 검증 후 cassette 보존 (Notepad / Kiro / Chrome / XG5000).
+# 본체에서 1환경 검증 후 cassette 보존 (Notepad / Kiro / Chrome).
 # ----------------------------------------------------------------------------
 function Invoke-MacroMouseVerify {
   param([string[]]$Rest)
