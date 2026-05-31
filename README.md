@@ -9,7 +9,7 @@ CUCP lets AI agents operate real Windows apps through an
 grounds actions in **Win32 windows, UIA controls, OCR text, and Chromium CDP**,
 then requires explicit safety gates before anything live runs.
 
-[![Version](https://img.shields.io/badge/version-v2.4.1-blue.svg)](https://github.com/bagseunggwon30-cyber/Computer-Use-Control-Plane/releases)
+[![Version](https://img.shields.io/badge/version-v2.4.2-blue.svg)](https://github.com/bagseunggwon30-cyber/Computer-Use-Control-Plane/releases)
 [![Platform](https://img.shields.io/badge/platform-Windows%2010%2F11-0078D4.svg?logo=windows)](https://learn.microsoft.com/windows/)
 [![PowerShell](https://img.shields.io/badge/PowerShell-5.1%2B-5391FE.svg?logo=powershell)](https://learn.microsoft.com/powershell/)
 [![Tests](https://img.shields.io/badge/Pester-190%2F190-brightgreen.svg)](#-verification)
@@ -33,7 +33,7 @@ cucp macro windows        # list open windows (read-only)
 ```
 
 - **One entry point** `cucp` — any AI agent drives the desktop through this single command
-- **109 macros** — observe / actuate / verify / CDP / OCR / UIA / recovery / PLC tooling
+- **109 macros** — observe / actuate / verify / CDP / OCR / UIA / recovery
 - **Safety first** — every live action requires `-AllowLiveControl` + hit-test guard + sensitive-action blocking
 - **Verified** — Pester 190/190, zero `Invoke-Expression` (no code-eval surface)
 
@@ -129,7 +129,7 @@ And every live action passes a layered safety gate ([below](#-safety--security))
 - **UIA (UI Automation)** — Windows' built-in accessibility layer (the same one screen
   readers use). It exposes every button, menu, and field by **name and role**, so CUCP
   can act on "the button named Save" instead of pixel `x=820, y=440`. Used for standard
-  Win32 apps (Notepad, XG5000, etc.).
+  Win32 apps (Notepad, file dialogs, settings panels, etc.).
 - **CDP (Chrome DevTools Protocol)** — the control channel for Chromium-based apps
   (Kiro, VS Code, Slack, Discord, Chrome). These apps are web pages inside, so CUCP
   reaches the **DOM element** directly — independent of screen coordinates.
@@ -148,7 +148,6 @@ And every live action passes a layered safety gate ([below](#-safety--security))
 | 🚑 **Recover** | modal-detect → recovery-plan → recovery-run (UI failure recovery loop) |
 | ⚡ **Speed** | daemon serve — ~31ms per call in resident mode (vs ~2s single-shot) |
 | 📊 **Benchmark** | read-only benchmark (p50/p95/avg + SLO, no PII collected) |
-| 🏭 **PLC tooling** | LS XG5000 / XP-Builder task-card · spec-board · ladder diagnosis |
 | 🛡️ **Governance** | audit-summary, policy-check, vision token budget, multi-user isolation |
 
 ---
@@ -216,12 +215,11 @@ processes, bounded input lengths.
 
 ---
 
-## 🏭 Use cases
+## 🧭 Use cases
 
 - **AI-agent desktop automation** — Codex / Claude / Kiro drive Windows apps via label-based, gated actions
 - **Electron app control** — operate Kiro / VS Code / Slack / Discord through the DOM via CDP
 - **Repetitive GUI workflows** — form filling, file ops, settings changes with a verify loop
-- **PLC engineering assist (LS XG5000 / XP-Builder)** — manage device/address/requirement context with task-card · spec-board, run first-pass ladder diagnosis (STOP-NC / self-hold / duplicate coils / SET-RST / word-as-bit), and gate-check before download/RUN. The built-in industrial safety gates are what set CUCP apart from general-purpose tools here.
 
 ---
 
@@ -251,10 +249,9 @@ cucp/
 │   ├── cucp.ps1                  # main wrapper (single entry point)
 │   ├── cucp-native-helper.ps1    # Win32 + UIA + OCR + CDP (P/Invoke)
 │   ├── cucp-helper-server.ps1    # resident helper (named-pipe IPC)
-│   ├── cucp-task-card.ps1        # XG5000 task card
-│   └── cucp-spec-board.ps1       # XG5000 spec / checklist board
+│   └── other helper scripts
 ├── references/             # detailed docs (command-reference, cdp-setup, troubleshooting ...)
-├── skills/                 # XG5000 Codex skills (assistant · ladder-diagnostician)
+├── skills/                 # optional Codex skills
 └── tests/                  # Pester regression tests
 ```
 

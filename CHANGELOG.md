@@ -1,77 +1,14 @@
 # CUCP Changelog
 
-## v2.4.1 - Ladder pattern library + I/O parameter modules (2026-05-30)
+## v2.4.2 - Public positioning cleanup (2026-05-31)
 
-자산 1(아키텍트)을 단일 패턴에서 **패턴 라이브러리**로 확장하고, spec-board 에 I/O 파라미터
-모듈 정보를 추가. "머릿속 구상 → 현장급 레더(모듈 장착 안내 + 변수 + 줄별 설명문) → 질문하며
-학습"하는 루프를 지원. 범위는 그대로 XG5000 편집/변수/레더텍스트까지 (download/RUN 금지).
+### Changed
 
-### Added — spec-board `modules` (I/O Parameter)
-
-- `cucp.spec-board/v2` 에 `modules` 필드: base/slot 별 장착 모듈 — 디지털 I/O, 아날로그 입력
-  (XBF-AD04A, raw 스케일), RTD 온도(XBF-RD04A, PT100), 아날로그 출력(XBF-DV04A). 채널 주소와
-  스케일/센서 정보 포함. `spec-board sequence` 렌더가 I/O Parameter 장착 안내 표를 함께 출력.
-
-### Added — Ladder pattern library (asset 1)
-
-- `xg5000-ladder-architect/references/patterns/` 패턴 카탈로그:
-  - `00-pattern-index.md` — 공정별 패턴 선택 가이드 + 변수 명명 컨벤션 + 산출물 표준(I/O안내·변수표·레더·설명문·검증)
-  - `basic-self-hold.md`, `motor-3wire.md`, `interlock-fwd-rev.md` — 기본 회로(자기유지·3선식·정역인터록)
-  - `seq-word-state-machine.md` — 정수형 스텝 제어
-  - `analog-scaling.md` — 아날로그 스케일링(32비트 DMUL/DDIV 오버플로 방지)
-  - `temperature-control.md` — RTD 온도제어(히스테리시스/PID, 과열·단선 방어)
-  - `arithmetic-compare.md` — 사칙연산/비교/카운트
-- SKILL.md 전면 개정: 패턴 선택 → 5종 산출물(I/O 파라미터 안내·변수표·레더·줄별 설명문·검증
-  체크리스트) 항상 세트 제출, 계층 구조(안전→모드→시퀀스→출력→진단), 학습 루프 가이드.
-- 모든 패턴은 공개 표준 제어 회로 지식. 특정 저자/영상 회로를 그대로 베끼지 않음.
-
-### Versions
-
-- skill **2.4.1** · helper-server 2.0.0 · cli backend 1.0.0
-
----
-
-## v2.4.0 - XG5000 Word State Machine ladder system (2026-05-30)
-
-XG5000 레더를 **정수형 스텝 제어(Word State Machine)** 로 생성·검증하는 3-자산 통합 세트.
-개별 M비트 SET/RST 도배(track control) 대신 단일 상태 워드(D1000) 로 단계를 관리하는
-시니어 엔지니어급 구조를 도구로 굳혔다. **범위는 XG5000 내부 편집/변수등록/레더 텍스트
-생성까지만 — PLC download/RUN/force I/O 는 기존대로 금지.**
-
-### Added — Asset 3: spec-board sequence schema (`cucp.spec-board/v2`)
-
-- `cucp-spec-board.ps1` 에 `sequences` 필드 추가 — 정수형 스텝 머신의 단일 진실 소스(contract).
-  각 step: `step` / `name` / `outputs` / `interlocks` / `transition{to,when}` / `timeout_ms`.
-  시퀀스: `state_word` / `timeout_timer` / `timeout_ms` / `fault_step` / `fault_record` /
-  `init{reset_to, estop_input, auto_condition, first_scan_relay}`.
-- `macro spec-board sequence` 모드 — 시퀀스를 표 + 아키텍트 변환 contract 로 렌더(프롬프트 주입용).
-- 구버전 v1 JSON 도 graceful 흡수(sequences 없으면 빈 배열). BOM 없는 UTF-8 저장으로 통일.
-
-### Added — Asset 1: `xg5000-ladder-architect` skill
-
-- 시니어 FA 아키텍트 페르소나 + **결정론적 변환 규칙**(Rule 0/E/T/O/W/H).
-  spec-board 시퀀스 JSON 을 "창의적 변형 없이" 레더로 변환: init/E-Stop 최우선 →
-  `[= state_word N] AND when → MOV` 전환 → 하단 출력 분리(중복 코일 금지) → 공통 타임아웃.
-- 출력 포맷 표준: 레더 텍스트 + I/O 할당표 + 검증 체크리스트. 모든 산출물은 사람 리뷰용 DRAFT.
-
-### Added — Asset 2: Word State Machine 검증 룰 (`diagnose-ladder.ps1`)
-
-- spec-board sequences 와 생성 레더를 대조하는 STEP010~050 룰:
-  - `STEP010` 출력이 `[= state_word N]` 분리 없이 구동 / `STEP011` 중복 코일
-  - `STEP020` 존재하지 않는 transition 대상 / `STEP030` init 리셋 룽 없음
-  - `STEP031` E-Stop 미참조(안전) / `STEP040` 공통 타임아웃 없음
-  - `STEP050` M비트 SET/RST 도배 감지 → 스텝 제어 전환 권유
-- report schema v1 → v2.
-
-### Verified
-
-- AST OK (spec-board, diagnose-ladder), Pester 190/190.
-- 통합 테스트: BAD 레더(SET/RST 도배+중복코일+init/estop 없음) → STEP010/011/030/031/040/050 정확 탐지.
-  GOOD 레더(규칙 준수) → STEP 위반 0건.
-
-### Versions
-
-- skill **2.4.0** · helper-server 2.0.0 · cli backend 1.0.0
+- Removed private, domain-specific workflow positioning from the public README.
+- Kept the public pitch focused on Windows computer-use: Win32, UIA, OCR, CDP,
+  recovery, safety gates, and daemon mode.
+- Kept private helper assets in the repository for the maintainer's local use,
+  but stopped presenting them as a general-purpose selling point.
 
 ---
 
@@ -140,46 +77,6 @@ child spawn 비용(~500ms)만 줄이지 PowerShell/wrapper cold-start(~1.5s)는 
 
 ---
 
-## v2.1.1 - XG5000 spec-board merge (2026-05-29)
-
-### Added
-
-- Integrated the v1.5.2 XG5000 `spec-board` package without downgrading the v2.1.0 wrapper.
-- Added `macro spec-board open|show|ensure|path|check|uncheck|ladder|markdown|clear`.
-- Added `scripts/cucp-spec-board.ps1` for an XG5000 project spec / checklist board.
-- Added `app-profile` auto-loading of `spec_board` for PLC/SCADA-like windows.
-- Added nested Codex skill `skills/xg5000-ladder-diagnostician/` with deterministic ladder diagnosis helper script.
-
-### Security & Refactor (2026-05-30)
-
-- **cassette BOM 회귀 수정**: `live-cassette-runner.ps1` / `live-verify-summary.ps1` 가
-  `Set-Content -Encoding UTF8` (PowerShell 5.x 에서 BOM 부착) 로 cassette JSON 을 저장해
-  `xg5000-evidence -Verify` 의 `no_utf8_bom` 계약 검사를 깨뜨리던 문제를 수정. 두 스크립트를
-  `[System.IO.File]::WriteAllText(..., UTF8Encoding($false))` 로 교체하고, 이미 생성된
-  cassette 10개의 BOM 도 제거. contract-verify 7/8 → 8/8 복구.
-- **무바운드 `WaitForExit()` 제거**: `Invoke-Cucp` 의 child node 프로세스 두 번째 대기를
-  `WaitForExit()` → `WaitForExit(5000)` 로 바운드 (이론상 핸들 잔류 시 행(hang) 위험 차단).
-- **중복 함수 정의 정리**: `Write-WrapperLog` 중복 정의 제거 (라인 201 정의 유지).
-  `Invoke-MacroClickPoint` 단순(가드 없는) 버전에 죽은 코드 명시 주석 — 실제 동작하는
-  정의는 hit-test/micro-refine/anchor-history 가드를 모두 갖춘 뒤쪽 버전.
-- **미구현 매크로 정직 처리**: `process` / `registry` / `notify` / `multi-select` /
-  `multi-edit` / `scrape` / `dom-snapshot` 가 dispatcher 에 광고됐으나 본체 미구현이라
-  호출 시 raw "함수를 인식할 수 없습니다" 런타임 에러가 나던 것을, 공통 헬퍼
-  `_Macro-NotImplemented` 로 표준 `cucp.not-implemented/v1` envelope + exit 1 반환하도록 변경.
-  `directSafetyLiveMacros` 에서도 미구현 5종을 제외해 surface 정합성 확보.
-- **보안 표면 점검 결과 (정본은 이미 견고)**: `Invoke-Expression`/`iex` 사용 0건,
-  `Start-Process` 인자는 배열(`@(...)`) 또는 전용 escape 헬퍼(`ConvertTo-ProcessArgumentString`)
-  사용, spec-board 기본 IP 는 RFC 5737 example 대역(192.0.2.x), diagnose-ladder 입력은
-  256KB cap + truncation note, helper-server pipe 는 owner-only ACL + lock owner_user 격리.
-
-### Verified
-
-- AST parse for `scripts/cucp.ps1`, `scripts/cucp-native-helper.ps1`, `scripts/cucp-helper-server.ps1`, and `scripts/cucp-spec-board.ps1`.
-- Smoke commands for `cucp version`, `macro spec-board ensure`, and `macro spec-board ladder`.
-- 정리 후 전체 회귀: **Pester 190/190**, **contract-verify 8/8**, **AST 6/6** 통과.
-
----
-
 ## v2.1.0 — Option B + Reliability + Enterprise (2026-05-29)
 
 ### 큰 틀 목표
@@ -237,9 +134,9 @@ child spawn 비용(~500ms)만 줄이지 PowerShell/wrapper cold-start(~1.5s)는 
 ### Added — Live cassette runner
 
 - **`references\live-cassette-runner.ps1`** (interactive runner):
-  - Notepad / Kiro / Chrome / XG5000 4환경 cassette 한 번에 보존.
+  - Notepad / Kiro / Chrome / native desktop app 4환경 cassette 한 번에 보존.
   - 결과: `live-verify\<env>\*.json` (`cucp.live-verify/v1` schema).
-  - 사용법: `.\references\live-cassette-runner.ps1 -Env all` (또는 `notepad` / `kiro` / `chrome` / `xg5000`).
+  - 사용법: `.\references\live-cassette-runner.ps1 -Env all` (또는 `notepad` / `kiro` / `chrome` / `desktop`).
   - DryRun 모드 지원 (`-DryRun` 으로 명령만 출력, 실행 안 함).
   - mouse-verify / cdp-prosemirror-insert / safe-type-ime 등 라이브 매크로 호출 자동화.
 
@@ -270,7 +167,7 @@ child spawn 비용(~500ms)만 줄이지 PowerShell/wrapper cold-start(~1.5s)는 
   검증은 본 sprint 범위 외. lock 파일 격리는 `owner_user` 비교로 방어.
 - **vision budget 은 단일 wrapper invocation scope**: 매 wrapper 호출마다 카운터 리셋.
   진짜 cross-invocation budget tracking 은 별도 sprint (예: NDJSON state file).
-- **cassette runner 는 사용자 라이브 환경 의존**: Notepad / Kiro / Chrome / XG5000
+- **cassette runner 는 사용자 라이브 환경 의존**: Notepad / Kiro / Chrome / native desktop app
   실행 상태에 따라 결과 schema 가 달라짐. 본 코드는 capture pipeline + cassette schema
   보장만, 실제 cassette 데이터 보존은 사용자 1회 실행 필요.
 - **cross-platform stub 은 schema 검증만**: 본 sprint 안에서 macOS / Linux 본체에서 실
@@ -337,7 +234,7 @@ v1.6.0 의 honest disclosure (single-shot helper-server 가속 안 됨, ProseMir
   필드 (v1.6.0 추가) 를 N회 샘플링해서 통계 보고. 라이브 cassette 보존용.
 - **safety gate**: `-AllowLiveControl` 플래그 없으면 exit 3 with `safety_blocked`. 검증됨.
 - **합격 기준 (제안)**: `drift_max ≤ 3px` 시 `passed: true`.
-- **4환경 cassette 대상** (별도 단계 필요): Notepad / Kiro / Chrome / XG5000.
+- **4환경 cassette 대상** (별도 단계 필요): Notepad / Kiro / Chrome / native desktop app.
 
 ### Added — ProseMirror live (CDP Input.insertText)
 
@@ -373,7 +270,7 @@ v1.6.0 의 honest disclosure (single-shot helper-server 가속 안 됨, ProseMir
 - **daemon batch 6.3x 는 sanity 측정 (5x windows 매크로 한정)**: 매크로 종류와 인자에
   따라 차이 발생. CPU-heavy 매크로는 가속 폭 줄어듬.
 - **mouse-verify 정확도 통계는 코드 준비만**: 실제 4환경 cassette (Notepad / Kiro /
-  Chrome / XG5000) 는 별도 라이브 환경에서 사용자가 직접 호출해야 보존 가능.
+  Chrome / native desktop app) 는 별도 라이브 환경에서 사용자가 직접 호출해야 보존 가능.
 - **cdp-prosemirror-insert 의 verified 필드는 innerText 비교 한정**: 일부 ProseMirror
   configuration (composition mode, IME conversion 진행 중) 에서는 false negative 가능.
 - **server-up 시에도 child fallback 100% 보존**: server crash / pipe error 시 자동 child
@@ -456,23 +353,6 @@ LLM) 어디서든 사용 가능한 single entry point 유지.
 - helper-server 가 지원하는 action 4개만 (windows / health / focused / modal-detect).
   OCR / CDP / smart-click 같은 비싼 action 은 여전히 child 경로 (확장은 v2.0.0 후보).
 - ProseMirror live 입력 / cross-platform stub / recorder / governance 는 `cucp-v2-integration` spec 의 Phase 3-4 에 분리.
-
----
-
-## v1.5.1 — XG5000 task-card context bridge (2026-05-27)
-
-### Added
-
-- `macro task-card open|show|ensure|save|path|clear`: small local context card for XG5000/XP-Builder work.
-- Task-card JSON schema `cucp.task-card/v1` with tool, project, PLC model, communication, devices, address ranges, requirements, constraints, notes, and safety flags.
-- `app-profile` now auto-loads `task_card` for PLC/SCADA-like windows so CUCP can plan with device and requirement context.
-- Added `scripts/cucp-task-card.ps1` and `references/xg5000-task-card.md`.
-- Added a separate Codex skill at `skills/xg5000-cucp-assistant/SKILL.md` for XG5000/XP-Builder sessions.
-
-### Verified
-
-- Parsed wrapper and task-card scripts with PowerShell AST.
-- Verified `task-card ensure`, `task-card show`, `task-card save`, `task-card path`, and `app-profile --match XG5000` task-card loading.
 
 ---
 
@@ -782,7 +662,7 @@ PII 미수집 benchmark 도 함께 보완.
 
 - `macro app-profile`: a read-only app strategy profiler that inspects the current or matched window, classifies the app surface, and recommends a control route order.
 - Browser/Electron targets now get CDP/DOM-first guidance when available, with UIA, OCR, and precision-point fallbacks.
-- PLC/SCADA-style Win32 targets now get UIA, guarded hit-test, precision-point, OCR, and vision-precise route guidance.
+- Native Win32 targets now get UIA, guarded hit-test, precision-point, OCR, and vision-precise route guidance.
 - Output includes `recommended_task_options`, `suggested_task_plan_prefix`, and per-label read-only `smart-plan` probe commands.
 - `workflow-plan`/`workflow-run` now classify `app-profile` as read-only.
 
@@ -1204,7 +1084,7 @@ contenteditable / nested input 도 안정적으로 focus + value set + dispatchE
 | ✅ Electron 앱 + 9222 포트 활성 | DOM 직접 제어, 좌표 무관 |
 | ⚠️ 디버그 포트 활성 안 됨 | partial(2) cdp_port_closed → 사용자 안내 |
 | ⚠️ Kiro 재시작 필요 (런타임 토글 안 됨) | 한 번 작업 끊김 |
-| ❌ Native Win32 앱 (메모장, XG5000) | CDP 미지원 → Stage 1~6 fallback |
+| ❌ Native Win32 앱 (메모장, settings panels) | CDP 미지원 → Stage 1~6 fallback |
 
 ### 솔직 평가
 
@@ -1733,7 +1613,7 @@ CUCP가 더 이상 Windows MCP helper나 Codex 공식 helper(`~/.codex/bin/codex
 
 | 표면 | 동작 |
 |---|---|
-| ✅ 표준 Win32/UWP 앱 (메모장, 탐색기, Office, XG5000 등) | UIA + 좌표 모두 결정론적 |
+| ✅ 표준 Win32/UWP 앱 (메모장, 탐색기, Office, settings panels 등) | UIA + 좌표 모두 결정론적 |
 | ✅ Electron 앱 (Codex/Kiro/Discord 등) | UIA 트리 노출됨, 동작 |
 | ⚠️ 브라우저 캔버스 (YouTube 재생 버튼, 게임 안 클릭) | UIA에 안 잡힘. `vision-click-precise` 또는 좌표 직접 (`click-point`) |
 | ⚠️ DirectX 게임 / exclusive fullscreen | screenshot 캡처 자체가 검은 화면일 수 있음 |
