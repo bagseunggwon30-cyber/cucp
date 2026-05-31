@@ -2,7 +2,7 @@
 # CUCP One-Click Installer
 # =============================================================================
 # 사용법 (PowerShell):
-#   git clone https://github.com/bagseunggwon30-cyber/cucp.git
+#   git clone https://github.com/bagseunggwon30-cyber/Computer-Use-Control-Plane.git
 #   cd cucp
 #   powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1
 #

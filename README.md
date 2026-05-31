@@ -2,21 +2,21 @@
 
 # 🖥️ CUCP — Computer Use Control Plane
 
-**Let any AI agent operate your Windows desktop — safely, precisely, and with receipts.**
+**Safer Windows computer-use for Codex, Claude, Kiro, and local AI agents.**
 
-A single control plane that lets AI agents (Codex · Claude · Kiro · any LLM)
-drive Windows apps through an **Observe → Think → Act → Verify** loop.
-Instead of guessing pixel coordinates, CUCP grounds actions in the
-**UIA accessibility tree, the DOM, OCR, and label matching** — and every live
-action must pass an **explicit safety gate** before it runs.
+CUCP lets AI agents operate real Windows apps through an
+**Observe → Think → Act → Verify** loop. Instead of blindly clicking pixels, it
+grounds actions in **Win32 windows, UIA controls, OCR text, and Chromium CDP**,
+then requires explicit safety gates before anything live runs.
 
 [![Version](https://img.shields.io/badge/version-v2.4.1-blue.svg)](https://github.com/bagseunggwon30-cyber/Computer-Use-Control-Plane/releases)
 [![Platform](https://img.shields.io/badge/platform-Windows%2010%2F11-0078D4.svg?logo=windows)](https://learn.microsoft.com/windows/)
 [![PowerShell](https://img.shields.io/badge/PowerShell-5.1%2B-5391FE.svg?logo=powershell)](https://learn.microsoft.com/powershell/)
 [![Tests](https://img.shields.io/badge/Pester-190%2F190-brightgreen.svg)](#-verification)
 [![Macros](https://img.shields.io/badge/macros-109-success.svg)](references/command-reference.md)
+[![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
-[Install](#-install-30s) · [First run](#-first-run-1-min) · [Macros](#-core-macros) · [Safety](#-safety--security) · [Use cases](#-use-cases) · [Docs](#-documentation)
+[Install](#-install-30s) · [Quick demo](#-quick-demo) · [First run](#-first-run-1-min) · [Macros](#-core-macros) · [Safety](#-safety--security) · [Use cases](#-use-cases) · [Docs](#-documentation)
 
 </div>
 
@@ -36,6 +36,28 @@ cucp macro windows        # list open windows (read-only)
 - **109 macros** — observe / actuate / verify / CDP / OCR / UIA / recovery / PLC tooling
 - **Safety first** — every live action requires `-AllowLiveControl` + hit-test guard + sensitive-action blocking
 - **Verified** — Pester 190/190, zero `Invoke-Expression` (no code-eval surface)
+
+---
+
+## 🎬 Quick demo
+
+![CUCP quick demo](docs/assets/cucp-quick-demo.gif)
+
+```powershell
+# Observe open windows without moving the mouse
+cucp macro windows
+
+# Find a UI target by label and role instead of guessing coordinates
+cucp macro find-label --label "Save" --explain
+
+# Act only after the live-control gate is explicit
+cucp -AllowLiveControl macro smart-click --label "Save" --match "Notepad"
+
+# Recover from failed UI steps with a read-only recovery plan
+cucp macro recovery-plan --failed-step "macro click-label --label Save"
+```
+
+This is the core promise: **ground first, act second, verify after**.
 
 ---
 
@@ -273,7 +295,7 @@ Full history in [`CHANGELOG.md`](CHANGELOG.md).
 
 ## 📜 License
 
-All rights reserved until stated otherwise. For usage/distribution, please open an issue.
+MIT. See [`LICENSE`](LICENSE).
 
 ---
 
