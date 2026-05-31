@@ -1,0 +1,17 @@
+# GitHub repository topics to apply after logging in with `gh auth login`.
+# GitHub does not read this file automatically; it is here to keep the repo
+# metadata reproducible.
+topics:
+  - computer-use
+  - ai-agents
+  - windows-automation
+  - uia
+  - ocr
+  - codex
+  - claude
+  - kiro
+  - powershell
+  - desktop-automation
+
+apply:
+  gh: gh repo edit bagseunggwon30-cyber/Computer-Use-Control-Plane --add-topic computer-use,ai-agents,windows-automation,uia,ocr,codex,claude,kiro,powershell,desktop-automation
