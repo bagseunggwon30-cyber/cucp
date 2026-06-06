@@ -11,3 +11,6 @@ Run from the repository root:
 Invoke-Pester .\tests\cucp.Fast.Tests.ps1
 Invoke-Pester .\tests\cucp.Tests.ps1
 ```
+
+The fast suite should stay safe for read-only local runs and must not require a
+specific application window to be open.
