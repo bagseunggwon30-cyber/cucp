@@ -36,6 +36,7 @@ credentials/
 *.tmp
 *.bak
 *.pester-out
+TestResult.xml
 
 # Test scratch files.
 tests/_*.ps1
