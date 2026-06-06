@@ -298,8 +298,5 @@ MIT. See [`LICENSE`](LICENSE).
 
 <div align="center">
 
-**Made with 🖱️ + ⌨️ for AI agents that respect your desktop**
-
-⭐ If this helped, please star the repo.
 
 </div>
