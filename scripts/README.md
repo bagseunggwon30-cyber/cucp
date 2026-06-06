@@ -7,3 +7,5 @@ Public entry points:
 - `cucp-helper-server.ps1` - optional resident helper for repeated low-latency calls.
 
 Keep live-control behavior gated by `-AllowLiveControl`.
+Prefer small wrapper changes with focused smoke tests; avoid mixing docs,
+installer, and runtime changes in one patch.
