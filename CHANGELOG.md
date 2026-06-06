@@ -13,6 +13,8 @@ Older internal workflow notes are intentionally not carried forward here.
   skill, command reference, CDP setup, and troubleshooting docs.
 - Removed hard-coded local maintainer paths from public-facing documentation.
 - Removed stale public claims that depended on an unpublished release tag.
+- Split follow-up cleanup into focused path-level commits so the GitHub file
+  listing shows meaningful maintenance history.
 
 ## v2.4.1 - Generic GUI Control Plane Baseline
 
