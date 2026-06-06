@@ -1,6 +1,6 @@
 # GitHub repository topics to apply after logging in with `gh auth login`.
 # GitHub does not read this file automatically; it is here to keep the repo
-# metadata reproducible.
+# metadata reproducible for future maintainers.
 topics:
   - computer-use
   - ai-agents
