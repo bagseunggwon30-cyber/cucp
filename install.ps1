@@ -14,7 +14,8 @@
 #
 # Safety:
 #   - No admin/UAC required. Uses only the current user's shim folder.
-#   - Does not change system files or registry. Remove the generated shim to undo.
+#   - Does not change system files or registry.
+#   - To undo, remove the generated `cucp.cmd` shim from the configured BinDir.
 # =============================================================================
 [CmdletBinding()]
 param(
