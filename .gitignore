@@ -1,5 +1,4 @@
-# CUCP runtime / cache (런타임에 만들어지는 파일들 — push 안 함)
-# 이 폴더들은 macro cleanup / wrapper 동작 중 자동 생성/삭제
+# CUCP runtime/cache files created during local runs.
 *.log
 *.ndjson
 wrapper-cache/
@@ -9,23 +8,23 @@ screenshots/
 trajectory.ndjson
 smart-click-history.ndjson
 
-# OS / 에디터 로컬 메타
+# OS/editor metadata.
 .DS_Store
 Thumbs.db
 *.swp
 *.swo
 *~
 
-# Python venv (만약 references/scripts 안에 들어올 경우)
+# Python scratch environments.
 __pycache__/
 *.pyc
 .venv/
 venv/
 
-# Node modules (스킬 자체엔 없지만 future-proof)
+# Node dependencies if future helper tooling is added.
 node_modules/
 
-# 잠재적 secret 위치 (현재 없지만 향후 보호)
+# Secret-bearing local files.
 .env
 .env.local
 *.key
@@ -33,19 +32,17 @@ node_modules/
 secrets/
 credentials/
 
-# Build/test temp
+# Build/test temp.
 *.tmp
 *.bak
-
-# v1.4.0: 임시 디버그 / 테스트 헬퍼 (절대 commit 안 함)
-tests/_*.ps1
-tests/scratch-*.ps1
 *.pester-out
 
-# v2.1.x: agent temp diagnostic scripts (dot prefix) + pester output cache (do not commit)
+# Test scratch files.
+tests/_*.ps1
+tests/scratch-*.ps1
 tests/.*.ps1
 tests/.*.txt
 
-# live-verify cassettes: 로컬 환경에서 실행한 결과 (창 제목 / URL 등 개인 화면 정보
-# 포함 가능). 공개 배포물에 넣지 않는다. 필요하면 references/live-cassette-runner.ps1 로 재생성.
+# Live verification cassettes may include local window titles, URLs, or screen
+# metadata. Regenerate them locally instead of committing them.
 live-verify/

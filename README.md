@@ -1,302 +1,214 @@
 <div align="center">
 
-# 🖥️ CUCP — Computer Use Control Plane
+# CUCP - Computer Use Control Plane
 
-**Safer Windows computer-use for Codex, Claude, Kiro, and local AI agents.**
+**A Windows GUI automation helper for AI agents that need to observe, ground,
+act, and verify on the real desktop.**
 
-CUCP lets AI agents operate real Windows apps through an
-**Observe → Think → Act → Verify** loop. Instead of blindly clicking pixels, it
-grounds actions in **Win32 windows, UIA controls, OCR text, and Chromium CDP**,
-then requires explicit safety gates before anything live runs.
-
-[![Version](https://img.shields.io/badge/version-v2.4.2-blue.svg)](https://github.com/bagseunggwon30-cyber/Computer-Use-Control-Plane/releases)
 [![Platform](https://img.shields.io/badge/platform-Windows%2010%2F11-0078D4.svg?logo=windows)](https://learn.microsoft.com/windows/)
 [![PowerShell](https://img.shields.io/badge/PowerShell-5.1%2B-5391FE.svg?logo=powershell)](https://learn.microsoft.com/powershell/)
-[![Tests](https://img.shields.io/badge/Pester-190%2F190-brightgreen.svg)](#-verification)
-[![Macros](https://img.shields.io/badge/macros-109-success.svg)](references/command-reference.md)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
-[Install](#-install-30s) · [Quick demo](#-quick-demo) · [First run](#-first-run-1-min) · [Macros](#-core-macros) · [Safety](#-safety--security) · [Use cases](#-use-cases) · [Docs](#-documentation)
+[Install](#install) . [First Run](#first-run) . [Safety](#safety-model) . [Commands](#command-groups) . [Docs](#documentation)
 
 </div>
 
 ---
 
-## TL;DR
+## What CUCP Does
+
+CUCP gives local AI agents one stable command, `cucp`, for Windows desktop
+automation. It avoids blind pixel clicking by combining:
+
+- Win32 window discovery and foreground detection
+- UI Automation controls, names, roles, and invoke patterns
+- OCR for visible text when UIA is incomplete
+- Chrome DevTools Protocol for Chromium and Electron apps
+- Explicit live-control gates before clicks, typing, shortcuts, or app changes
+
+The core loop is simple:
+
+```text
+Observe -> Plan -> Act -> Verify
+```
+
+Read-only commands can inspect the desktop. Live commands require
+`-AllowLiveControl`, and coordinate-based actions are guarded by target-window
+checks.
+
+## Install
 
 ```powershell
 git clone https://github.com/bagseunggwon30-cyber/Computer-Use-Control-Plane.git cucp
 cd cucp
 powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1
-
-cucp macro windows        # list open windows (read-only)
 ```
 
-- **One entry point** `cucp` — any AI agent drives the desktop through this single command
-- **109 macros** — observe / actuate / verify / CDP / OCR / UIA / recovery
-- **Safety first** — every live action requires `-AllowLiveControl` + hit-test guard + sensitive-action blocking
-- **Verified** — Pester 190/190, zero `Invoke-Expression` (no code-eval surface)
+The installer:
 
----
+- checks for Windows and PowerShell 5.1+
+- creates a user-scope `cucp.cmd` shim
+- does not require admin rights
+- verifies the wrapper with `health-quick`
 
-## 🎬 Quick demo
+Prefer not to install? Run the wrapper directly:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\cucp.ps1 macro windows
+```
+
+To uninstall the shim, delete:
+
+```text
+%LOCALAPPDATA%\Microsoft\WindowsApps\cucp.cmd
+```
+
+## First Run
+
+```powershell
+# Read-only: list visible windows
+cucp macro windows
+
+# Read-only: find candidate controls by visible label
+cucp macro find-label --label "Save" --explain
+
+# Read-only: show wrapper/helper status
+cucp version
+cucp macro health-quick
+
+# Live: click only after explicit live-control approval
+cucp -AllowLiveControl macro smart-click --label "Save" --match "Notepad"
+```
 
 ![CUCP quick demo](docs/assets/cucp-quick-demo.gif)
 
-```powershell
-# Observe open windows without moving the mouse
-cucp macro windows
+## Safety Model
 
-# Find a UI target by label and role instead of guessing coordinates
-cucp macro find-label --label "Save" --explain
-
-# Act only after the live-control gate is explicit
-cucp -AllowLiveControl macro smart-click --label "Save" --match "Notepad"
-
-# Recover from failed UI steps with a read-only recovery plan
-cucp macro recovery-plan --failed-step "macro click-label --label Save"
-```
-
-This is the core promise: **ground first, act second, verify after**.
-
----
-
-## ⚡ Install (30s)
-
-```powershell
-# 1. Clone
-git clone https://github.com/bagseunggwon30-cyber/Computer-Use-Control-Plane.git cucp
-cd cucp
-
-# 2. One-click install (no admin / UAC required)
-powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1
-```
-
-What `install.ps1` does:
-- Checks for PowerShell 5.1+ on Windows
-- Registers the `cucp` command on your PATH (user-scope shim, no UAC)
-- Verifies the install with `health-quick`
-
-> Prefer not to install? Just run `scripts\cucp.ps1` directly.
-> To uninstall, delete `%LOCALAPPDATA%\Microsoft\WindowsApps\cucp.cmd` — that's it.
-
----
-
-## 🚀 First run (1 min)
-
-```powershell
-# Observe — list open windows (read-only, safe)
-cucp macro windows
-
-# Observe — score 'Save' label candidates with reasoning
-cucp macro find-label --label "Save" --explain
-
-# Version — unified skill / cli / helper-server report
-cucp version
-
-# Actuate — a real click (LIVE: requires -AllowLiveControl)
-cucp -AllowLiveControl macro smart-click --label "Save" --match "Notepad"
-```
-
-Read-only macros run with no gate. Macros that actually click or type **only run
-when you add `-AllowLiveControl`**. That is CUCP's first safety rule.
-
----
-
-## 🤔 Why CUCP
-
-Most computer-use tools **look at a screenshot and guess coordinates** to click.
-Small buttons, dense grids, or a window that moves — and they miss.
-
-CUCP combines **four perception stacks** to minimize coordinate guessing:
-
-```
-Win32 API        UIA               OCR                    Chrome DevTools Protocol
-   │              │                 │                          │
- window enum   accessibility     ko/en/ja/zh              Electron / Chromium apps
- & hit-test    tree + patterns   text recognition         (Kiro / VS Code / Slack / Chrome)
-```
-
-- **Click by label** — find the "Save" button by its name/role, not a coordinate
-- **UIA Pattern.Invoke** — trigger controls through the accessibility API without moving the mouse
-- **CDP / DOM** — for Electron apps, reach into the DOM directly (through Shadow DOM / iframes)
-- **Hit-test guard** — before any click, confirm the coordinate really lands on the intended window
-
-And every live action passes a layered safety gate ([below](#-safety--security)).
-
-### What are UIA and CDP?
-
-- **UIA (UI Automation)** — Windows' built-in accessibility layer (the same one screen
-  readers use). It exposes every button, menu, and field by **name and role**, so CUCP
-  can act on "the button named Save" instead of pixel `x=820, y=440`. Used for standard
-  Win32 apps (Notepad, file dialogs, settings panels, etc.).
-- **CDP (Chrome DevTools Protocol)** — the control channel for Chromium-based apps
-  (Kiro, VS Code, Slack, Discord, Chrome). These apps are web pages inside, so CUCP
-  reaches the **DOM element** directly — independent of screen coordinates.
-
----
-
-## ✨ Features
-
-| Area | Capability |
-|:--|:--|
-| 👁️ **Observe** | window enum, foreground extraction, UIA tree, OCR (ko/en/ja/zh) |
-| 🖱️ **Actuate** | UIA Pattern.Invoke, Win32 SendInput, OCR+UIA fusion, IME-safe paste |
-| ✅ **Verify** | pixel-level screenshot diff, hit-test guard, click-and-verify, precision-validate |
-| 🧠 **Learn** | smart-click history (recent lookback), anchor reuse scoring |
-| 🌐 **Electron/Chrome** | CDP integration — direct DOM access, Shadow DOM / iframe traversal |
-| 🚑 **Recover** | modal-detect → recovery-plan → recovery-run (UI failure recovery loop) |
-| ⚡ **Speed** | daemon serve — ~31ms per call in resident mode (vs ~2s single-shot) |
-| 📊 **Benchmark** | read-only benchmark (p50/p95/avg + SLO, no PII collected) |
-| 🛡️ **Governance** | audit-summary, policy-check, vision token budget, multi-user isolation |
-
----
-
-## 🎯 Core macros
-
-```powershell
-# ── Observe (read-only) ───────────────────────────────────────
-cucp macro windows                                  # Win32 window enum (deterministic)
-cucp macro find-label --label "Save" --explain      # label candidates + scoring
-cucp macro ocr-find-text --text "Send"              # OCR (Windows.Media.Ocr)
-cucp macro app-profile --match Chrome --auto-probe  # app automation strategy score
-
-# ── Actuate (live, requires -AllowLiveControl) ────────────────
-cucp -AllowLiveControl macro click-label --label "Save"
-cucp -AllowLiveControl macro smart-click --label "Save" --match Kiro
-#     └ cascade: UIA Pattern → UIA coord → icon → fusion → OCR → vision
-cucp -AllowLiveControl macro fill-label --label "Name" --text "Alice" --enter
-cucp -AllowLiveControl macro shortcut --keys "ctrl+s"
-
-# ── Electron/Chrome — CDP/DOM (coordinate-free) ───────────────
-# Start the app with --remote-debugging-port=9222 first (references/cdp-setup.md)
-cucp macro cdp-detect
-cucp macro cdp-deep-find --text "Send" --page-match Kiro   # through Shadow DOM/iframes
-cucp -AllowLiveControl macro cdp-smart-click --text "Send"
-
-# ── Recovery loop ─────────────────────────────────────────────
-cucp macro modal-detect
-cucp macro recovery-plan --failed-step "macro click-label --label Save"
-
-# ── Speed: resident daemon (~31ms per call) ───────────────────
-cucp macro daemon serve            # resident mode that takes JSON-line commands on stdin
-```
-
-See [`references/command-reference.md`](references/command-reference.md) for all 109 macros.
-
----
-
-## 🛡️ Safety & security
-
-Every live action must pass a layered gate before it runs:
+CUCP is designed for local desktop control, so safety is part of the command
+surface:
 
 | Gate | Behavior |
 |:--|:--|
-| 🔐 **AllowLiveControl** | Any actuation macro is blocked (exit 3) without `-AllowLiveControl` |
-| 🎯 **Hit-test guard** | Coordinate clicks must pass `--target-match` / `--target-hwnd` window checks |
-| 🔢 **Confidence floor** | Low-confidence matches (score < 60) are auto-rejected |
-| 🚫 **Sensitive gate** | UAC / password / payment / credential screens are auto-refused |
-| 📝 **Audit trail** | Every live action is logged to a trajectory NDJSON |
-| 🧹 **Secret redaction** | PAT / sk- / AKIA / Bearer / JWT / PEM (6 patterns) masked before output |
-| 🔒 **Multi-user isolation** | helper-server pipe owner-only ACL + lock owner check |
+| Live-control flag | Clicks, typing, shortcuts, app launch/close, and workflow execution are blocked unless `-AllowLiveControl` is present. |
+| Target verification | Coordinate actions can require `--target-match` or `--target-hwnd` before input is sent. |
+| Confidence floor | Low-confidence matches are rejected instead of guessed. |
+| Sensitive action guard | Credential, payment, UAC, identity, destructive, and private-message screens are treated as stop conditions. |
+| Audit trail | Live action attempts are recorded under the local temp CUCP directory. |
+| Secret redaction | Logs and release-note helpers redact common token and private-key patterns. |
 
-Design principles: zero `Invoke-Expression`/`iex`, array/escaped args for external
-processes, bounded input lengths.
+CUCP is not a UAC bypass tool, a credential entry tool, or a background malware
+automation framework. It is a local operator helper for user-approved desktop
+workflows.
 
-### Standard exit codes
+## Command Groups
 
-| code | meaning |
-|:-:|:--|
-| `0` | ok |
-| `1` | generic failure / not_found / missing input |
-| `2` | partial / ambiguous / no_match (recoverable) |
-| `3` | safety blocked (gate not satisfied) |
-| `124` | timeout |
-
----
-
-## 🧭 Use cases
-
-- **AI-agent desktop automation** — Codex / Claude / Kiro drive Windows apps via label-based, gated actions
-- **Electron app control** — operate Kiro / VS Code / Slack / Discord through the DOM via CDP
-- **Repetitive GUI workflows** — form filling, file ops, settings changes with a verify loop
-
----
-
-## ✅ Verification
-
-| Item | Result |
-|:--|:--|
-| Pester regression | **190 / 190** |
-| contract-verify | **8 / 8** |
-| AST parse | 6 / 6 OK |
-| code-eval surface | `Invoke-Expression` **0** |
+Common read-only commands:
 
 ```powershell
-# Run the regression suite yourself (Pester required)
+cucp macro windows
+cucp macro find-label --label "Save" --explain
+cucp macro list-affordances --window "Notepad" --limit 20
+cucp macro screenshot --out-path .\screen.png
+cucp macro health-quick
+cucp macro log-tail --errors-only
+```
+
+Common planning and verification commands:
+
+```powershell
+cucp macro smart-plan --label "Save" --match "Notepad"
+cucp macro workflow-plan --step "macro windows" --step "macro find-label --label Save"
+cucp macro hit-test --x 1200 --y 720 --target-match "Notepad"
+cucp macro target-validate --x 1200 --y 720 --target-match "Notepad"
+cucp macro recovery-plan --failed-step "macro click-label --label Save"
+```
+
+Common live-control commands:
+
+```powershell
+cucp -AllowLiveControl macro click-label --label "Save" --match "Notepad"
+cucp -AllowLiveControl macro fill-label --label "Name" --text "Alice"
+cucp -AllowLiveControl macro shortcut --keys "ctrl+s"
+cucp -AllowLiveControl macro smart-click --label "Save" --match "Notepad"
+```
+
+Chromium and Electron apps can opt into CDP routes when launched with a local
+debugging port:
+
+```powershell
+cucp macro cdp-detect --port 9222
+cucp macro cdp-deep-find --text "Send" --port 9222
+cucp -AllowLiveControl macro cdp-smart-click --text "Send" --port 9222
+```
+
+See [references/command-reference.md](references/command-reference.md) for the
+command reference and [references/cdp-setup.md](references/cdp-setup.md) for CDP
+setup.
+
+## Architecture
+
+```text
+scripts/cucp.ps1
+  Public wrapper, safety gates, macro dispatch, JSON envelopes, audit logging.
+
+scripts/cucp-native-helper.ps1
+  Win32, UIA, OCR, screenshots, hit-test guards, CDP helper actions.
+
+scripts/cucp-helper-server.ps1
+  Optional resident helper for lower-latency repeated calls.
+
+plans/
+  Example typed desktop plans.
+
+references/
+  Command reference, CDP setup, troubleshooting, live verification helpers.
+
+tests/
+  Pester smoke and regression tests.
+```
+
+## Verification
+
+Fast smoke suite:
+
+```powershell
+Invoke-Pester .\tests\cucp.Fast.Tests.ps1
+```
+
+Full regression suite:
+
+```powershell
 Invoke-Pester .\tests\cucp.Tests.ps1
 ```
 
----
+Script parser check without Pester:
 
-## 📁 Layout
-
-```
-cucp/
-├── install.ps1              # one-click installer
-├── README.md · CHANGELOG.md · SKILL.md
-├── scripts/
-│   ├── cucp.ps1                  # main wrapper (single entry point)
-│   ├── cucp-native-helper.ps1    # Win32 + UIA + OCR + CDP (P/Invoke)
-│   ├── cucp-helper-server.ps1    # resident helper (named-pipe IPC)
-│   └── other helper scripts
-├── references/             # detailed docs (command-reference, cdp-setup, troubleshooting ...)
-├── skills/                 # optional Codex skills
-└── tests/                  # Pester regression tests
+```powershell
+$files = 'scripts\cucp.ps1','scripts\cucp-native-helper.ps1','scripts\cucp-helper-server.ps1'
+foreach ($file in $files) {
+  $tokens = $null
+  $errors = $null
+  [System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path $file), [ref]$tokens, [ref]$errors) | Out-Null
+  if ($errors.Count) { $errors | Format-List; exit 1 }
+}
 ```
 
----
+## Documentation
 
-## 🚧 Limitations (honest)
+- [Command reference](references/command-reference.md)
+- [CDP setup](references/cdp-setup.md)
+- [Troubleshooting](references/troubleshooting.md)
+- [Remaining work](references/remaining-work.md)
 
-- **Windows 10/11 only** — depends on `Windows.Media.Ocr` · UIA · Win32. macOS/Linux gets an honest stub only.
-- **Single-shot calls take ~2s** — PowerShell + wrapper cold start. The fast path is `daemon serve` (~31ms per call).
-- **DirectX/fullscreen games, DRM-protected screens** — capture may fail.
-- **Very small fonts (<8pt)** — OCR accuracy drops.
-- **Cross-origin iframes** — traversal is blocked for security (only the count is reported).
+## Status
 
----
+CUCP is Windows-first and PowerShell-based. Some commands work as pure wrapper
+logic; others need desktop access, UI Automation, OCR language packs, a running
+Chromium debugging port, or the optional helper server. When a capability is not
+available, commands should return an explicit envelope with `status`, exit code,
+and a recoverable error instead of silently guessing.
 
-## 🗺️ Roadmap
+## License
 
-- Make `daemon serve` the default call path (removes the single-shot penalty)
-- macOS / Linux port
-- DXGI capture (games / fullscreen)
-- Multi-monitor coord-anchor auto re-anchoring
-
-Full history in [`CHANGELOG.md`](CHANGELOG.md).
-
----
-
-## 📚 Documentation
-
-| Doc | Description |
-|:--|:--|
-| [`CHANGELOG.md`](CHANGELOG.md) | Version history |
-| [`references/command-reference.md`](references/command-reference.md) | Full macro reference |
-| [`references/troubleshooting.md`](references/troubleshooting.md) | Diagnostics / recovery / selector scoring |
-| [`references/cdp-setup.md`](references/cdp-setup.md) | Enabling Electron CDP |
-| [`SKILL.md`](SKILL.md) | AI-agent skill registration metadata |
-
----
-
-## 📜 License
-
-MIT. See [`LICENSE`](LICENSE).
-
----
-
-<div align="center">
-
-
-</div>
+No license file is currently published on `main`. Add a license before treating
+this repository as open-source redistributable software.

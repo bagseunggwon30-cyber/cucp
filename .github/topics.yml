@@ -9,9 +9,8 @@ topics:
   - ocr
   - codex
   - claude
-  - kiro
   - powershell
   - desktop-automation
 
 apply:
-  gh: gh repo edit bagseunggwon30-cyber/Computer-Use-Control-Plane --add-topic computer-use,ai-agents,windows-automation,uia,ocr,codex,claude,kiro,powershell,desktop-automation
+  gh: gh repo edit bagseunggwon30-cyber/Computer-Use-Control-Plane --add-topic computer-use,ai-agents,windows-automation,uia,ocr,codex,claude,powershell,desktop-automation
