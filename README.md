@@ -32,6 +32,9 @@ The core loop is simple:
 Observe -> Plan -> Act -> Verify
 ```
 
+This repository is meant to be a reusable Windows automation layer, not a
+project-specific desktop workflow dump.
+
 Read-only commands can inspect the desktop. Live commands require
 `-AllowLiveControl`, and coordinate-based actions are guarded by target-window
 checks.
