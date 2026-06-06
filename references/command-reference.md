@@ -177,6 +177,7 @@ cucp -AllowLiveControl plan run --file .\plans\notepad-hello-world.json --readin
 ```
 
 Plan files should make observations, actions, and verification steps explicit.
+Keep examples generic enough to run on a clean Windows development machine.
 
 ## Testing
 

@@ -17,6 +17,7 @@ agents.
 - Improve multi-monitor coordinate validation documentation.
 - Add repeatable benchmark instructions that separate smoke tests from live
   desktop tests.
+- Add issue templates for bug reports that avoid collecting private screenshots.
 - Add more deterministic examples for CDP, UIA, OCR fallback, and recovery.
 - Keep private workflow details out of public release notes and references.
 

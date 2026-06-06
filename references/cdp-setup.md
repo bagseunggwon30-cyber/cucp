@@ -71,6 +71,8 @@ acceptable. On shared or untrusted machines, disable the debugging port when it
 is not needed.
 
 Do not expose the debugging port on a public network interface.
+Close the app or restart it without the flag when CDP access is no longer
+needed.
 
 ## Troubleshooting
 

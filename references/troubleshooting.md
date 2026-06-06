@@ -91,6 +91,9 @@ cucp macro diagnose-lag --sample-ms 3000
 Use these when an agent loop feels slow. They are diagnostic tools, not hard
 pass/fail benchmarks.
 
+Prefer collecting a small command transcript over broad screen recordings when
+debugging public issues.
+
 ## Parser Check
 
 If a script edit may have broken PowerShell syntax:
