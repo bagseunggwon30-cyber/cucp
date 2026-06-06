@@ -17,6 +17,7 @@ triggers:
     - screen control
     - app control
     - gui automation
+    - safe desktop automation
     - label click
     - button click
     - window list

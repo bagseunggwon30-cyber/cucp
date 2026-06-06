@@ -18,6 +18,9 @@ When installed through `install.ps1`, the same wrapper is available as:
 cucp <args>
 ```
 
+Prefer the `cucp` shim in normal use and fall back to the explicit script path
+only when the shim is not installed.
+
 ## Operating Loop
 
 Use CUCP in this order:
